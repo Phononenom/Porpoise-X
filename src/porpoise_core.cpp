@@ -10,7 +10,9 @@
  * because this console refuses a title's dlopen, and its imports are bound to
  * the title's symbols (build/core_imports.inc). */
 #include "porpoise_paths.hpp"
+#include "porpoise_debuglog.hpp"
 #include "porpoise_core.hpp"
+#include "gba_stream.hpp"
 #include "porpoise_atomic.hpp"
 #ifdef PORPOISE_DESKTOP
 #include "porpoise_platform.hpp"
@@ -20,11 +22,15 @@
 #include "porpoise_ra.hpp"
 #include "porpoise_speaker.hpp"
 #include "porpoise_states.hpp"
+#include "porpoise_dolphinbar.hpp"
+#include "porpoise_ns2gc.hpp"
+#include "porpoise_usbhid.hpp"
 
 #include <ps5platform/libc.h>
 
 #include <atomic>
 #include <algorithm>
+#include <chrono>
 #include <cerrno>
 #include <cmath>
 #include <cstdarg>
@@ -130,6 +136,41 @@ struct Host
     int next_disc = -1;
     std::string next_disc_path;
     bool hold_input = false; /* after the menu: the game sees no buttons until all are let go */
+    /* The integrated GBAs (the core's dolphin_gba_set_keys / dolphin_gba_get_frame; null with a
+     * core without them). Each GameCube port's: who plays it (-2 no GBA there, -1 nobody: the page
+     * only, 0..3 a player), set_gba_controls. */
+    std::atomic<int> gba_who[4] = {-2, -2, -2, -2};
+    std::atomic<bool> gba_web{true}; /* the GBAs' page in a browser (set_gba_web, gba_stream) */
+    /* Each GBA's newest picture, fetched once a loop on the game's thread for both the TV
+     * (gba_frame) and the page (gba_stream): the core's number for it, Porpoise's own count of
+     * pictures taken, and the frame the TV last asked (it keeps asking while it shows it). */
+    struct GbaPicture
+    {
+        unsigned core_seq = 0, count = 0, w = 0, h = 0;
+        std::vector<std::uint16_t> px;
+        unsigned long long tv_asked = 0;
+        bool web_was = false; /* the page wanted pictures last loop */
+    };
+    GbaPicture gba_pic[4];
+    void (*gba_set_web_server)(bool on) = nullptr;
+    void (*gba_reset)(unsigned port) = nullptr;
+    std::size_t (*gba_mix)(unsigned port, std::int16_t *stereo, std::size_t frames) = nullptr; /* porpoise_mix_gba */
+    void (*gba_volume_fn)(unsigned port, unsigned volume) = nullptr; /* porpoise_gba_volume */
+    void (*gba_request_fn)(unsigned port, int what, const char *path) = nullptr; /* dolphin_gba_request */
+    void (*gba_route_fn)(unsigned port, int routed) = nullptr; /* porpoise_route_gba */
+    std::atomic<bool> gba_connected[4] = {true, true, true, true}; /* the link cable in (Disconnect) */
+    std::atomic<bool> gba_speaker_on[4] = {}; /* its sound on its player's controller (Playback) */
+    bool gba_disconnect_held[porpoise::pad::kMaxPlayers] = {};
+    /* The game to put in each GBA as the game starts (set_gba_rom), sent once the core can. */
+    std::mutex gba_rom_lock;
+    std::string gba_rom_pending[4];
+    bool gba_rom_beside[4] = {};
+    bool gba_rom_sent[4] = {};
+    std::atomic<unsigned> gba_volume[4] = {256, 256, 256, 256}; /* each GBA's, 0..256 (set_gba_volume) */
+    bool gba_reset_held[porpoise::pad::kMaxPlayers] = {}; /* each player's Reset GBA, last loop */
+    void (*gba_set_keys)(unsigned port, std::uint16_t mask) = nullptr;
+    bool (*gba_get_frame)(unsigned port, std::uint16_t *pixels, std::size_t capacity, unsigned *width,
+                          unsigned *height, unsigned *seq) = nullptr;
     porpoise::pad::WiiConfig wii;   /* a Wii game's Remote */
     bool wii_changed = false;       /* the in-game menu changed it: the ports again */
     std::FILE *motion_log = nullptr; /* the debug folder's motion-<time>.csv */
@@ -141,6 +182,7 @@ struct Host
     long long motion_log_bytes = 0;
     unsigned long long frame_number = 0;
     bool plugged[porpoise::pad::kMaxPlayers] = {}; /* GameCube ports with a controller in */
+    bool ports_real = false; /* the ports were given real Wii Remotes (WiiConfig::real_remotes) */
     /* 4.0: player 1's GameCube port (Settings > Controls); the player whose
      * port that is takes port 1. Wii games keep 0. */
     std::atomic<int> p1_port_want{0};
@@ -447,11 +489,40 @@ int player_of(unsigned port)
     return int(port);
 }
 
+/* Player 1 last played with the Switch 2's GameCube controller (else the
+ * DualSense): it gets the rumble (merge_ns2gc). */
+std::atomic<bool> g_p1_on_gc{true};
+
+/* The Switch 2's GameCube controller plays a GameCube controller: in a
+ * GameCube game, or a Wii game played with one. */
+bool gamecube_controls()
+{
+    return !h.wii.active || h.wii.controller == porpoise::pad::WiiGameCube;
+}
+
 bool set_rumble(unsigned port, enum retro_rumble_effect effect, uint16_t strength)
 {
     if (port >= unsigned(porpoise::pad::kMaxPlayers))
         return false;
-    porpoise::pad::set_rumble(player_of(port), effect == RETRO_RUMBLE_STRONG, strength);
+    /* Player 1 with the Switch 2's GameCube controller plugged in: the rumble
+     * goes to whichever of it and the DualSense was played with last (its
+     * one motor runs while either of the game's is on), the other is still. */
+    if (player_of(port) == 0 && porpoise::ns2gc::connected() && gamecube_controls())
+    {
+        static std::atomic<std::uint16_t> strong{0}, weak{0};
+        (effect == RETRO_RUMBLE_STRONG ? strong : weak) = strength;
+        const bool gc = g_p1_on_gc.load();
+        porpoise::ns2gc::set_rumble(gc && (strong.load() || weak.load()));
+        porpoise::pad::set_rumble(0, effect == RETRO_RUMBLE_STRONG, gc ? 0 : strength);
+        if (gc)
+            porpoise::pad::set_rumble(0, effect != RETRO_RUMBLE_STRONG, 0);
+    }
+    else
+    {
+        porpoise::pad::set_rumble(player_of(port), effect == RETRO_RUMBLE_STRONG, strength);
+        if (player_of(port) == 0)
+            porpoise::ns2gc::set_rumble(false);
+    }
     /* Two-controller play: the Remote's rumble is felt in both hands. */
     if (port == 0 && h.wii.active && h.wii.controller == porpoise::pad::WiiTwoControllers)
         porpoise::pad::set_rumble(1, effect == RETRO_RUMBLE_STRONG, strength);
@@ -718,9 +789,9 @@ std::size_t audio_batch(const int16_t *data, std::size_t frames)
  * Porpoise binds to that port's accelerometer (nunchuk_motion_step). */
 int remote_player(unsigned port)
 {
-    if (h.wii.controller == porpoise::pad::WiiTwoControllers)
-        return port <= 1 ? int(port) : -1;
-    return int(port);
+    /* (Two controllers: port 1's motion is player 1's Nunchuk, player 2's
+     * DualSense. 4.5 Beta 4: players 3 and 4 play on beside it.) */
+    return port < unsigned(porpoise::pad::kMaxPlayers) ? int(port) : -1;
 }
 
 bool RETRO_CALLCONV set_sensor_state(unsigned port, enum retro_sensor_action action, unsigned)
@@ -743,11 +814,81 @@ bool RETRO_CALLCONV set_sensor_state(unsigned port, enum retro_sensor_action act
 porpoise::pad::State g_frame_pads[2][porpoise::pad::kMaxPlayers];
 std::atomic<int> g_frame_pads_now{0};
 
+/* The Switch 2's GameCube controller (porpoise_ns2gc.hpp), plugged in, is
+ * player 1's beside the DualSense: both work, a button pressed on either is
+ * pressed, and each stick and trigger is whichever is pushed further. */
+void merge_ns2gc(porpoise::pad::State &p)
+{
+    const porpoise::ns2gc::Pad gc = porpoise::ns2gc::pad();
+    static bool was_connected = false;
+    if (!gc.connected || !gamecube_controls())
+    {
+        was_connected = false;
+        return;
+    }
+    /* Which of the two player 1 is playing with: the one whose buttons
+     * change or whose stick or trigger is pushed (plugged in: this one). */
+    {
+        static std::uint32_t gc_prev = 0, ds_prev = 0;
+        auto pushed = [](int v) { return std::abs(v) > 16000; };
+        const bool gc_moved = (gc.buttons & ~gc_prev) || pushed(gc.lx) || pushed(gc.ly) || pushed(gc.rx) ||
+                              pushed(gc.ry) || gc.lt > 16000 || gc.rt > 16000;
+        const bool ds_moved = (p.buttons & ~ds_prev) || pushed(p.left_x) || pushed(p.left_y) ||
+                              pushed(p.right_x) || pushed(p.right_y) || p.l2 > 16000 || p.r2 > 16000;
+        bool on_gc = g_p1_on_gc.load();
+        if (!was_connected || gc_moved)
+            on_gc = true;
+        else if (ds_moved)
+            on_gc = false;
+        if (on_gc != g_p1_on_gc.load())
+        {
+            g_p1_on_gc = on_gc;
+            /* the one put down stops at once */
+            if (on_gc)
+            {
+                porpoise::pad::set_rumble(0, true, 0);
+                porpoise::pad::set_rumble(0, false, 0);
+            }
+            else
+                porpoise::ns2gc::set_rumble(false);
+        }
+        gc_prev = gc.buttons;
+        ds_prev = p.buttons;
+        was_connected = true;
+    }
+    namespace n = porpoise::ns2gc;
+    static const struct
+    {
+        std::uint32_t button;
+        unsigned retro;
+    } kMap[] = {
+        /* as the core reads a GameCube controller (porpoise_pad.cpp, kGcRetro) */
+        {n::GcA, RETRO_DEVICE_ID_JOYPAD_A},         {n::GcB, RETRO_DEVICE_ID_JOYPAD_B},
+        {n::GcX, RETRO_DEVICE_ID_JOYPAD_X},         {n::GcY, RETRO_DEVICE_ID_JOYPAD_Y},
+        {n::GcZ, RETRO_DEVICE_ID_JOYPAD_R},         {n::GcL, RETRO_DEVICE_ID_JOYPAD_L2},
+        {n::GcR, RETRO_DEVICE_ID_JOYPAD_R2},        {n::GcStart, RETRO_DEVICE_ID_JOYPAD_START},
+        {n::GcUp, RETRO_DEVICE_ID_JOYPAD_UP},       {n::GcDown, RETRO_DEVICE_ID_JOYPAD_DOWN},
+        {n::GcLeft, RETRO_DEVICE_ID_JOYPAD_LEFT},   {n::GcRight, RETRO_DEVICE_ID_JOYPAD_RIGHT},
+    };
+    for (const auto &m : kMap)
+        if (gc.buttons & m.button)
+            p.joypad = std::uint16_t(p.joypad | (1u << m.retro));
+    auto further = [](std::int16_t a, std::int16_t b) { return std::abs(int(b)) > std::abs(int(a)) ? b : a; };
+    p.left_x = further(p.left_x, gc.lx);
+    p.left_y = further(p.left_y, gc.ly);
+    p.right_x = further(p.right_x, gc.rx);
+    p.right_y = further(p.right_y, gc.ry);
+    p.l2 = std::max(p.l2, gc.lt);
+    p.r2 = std::max(p.r2, gc.rt);
+    p.connected = true;
+}
+
 void publish_frame_pads()
 {
     const int next = 1 - g_frame_pads_now.load(std::memory_order_relaxed);
     for (int player = 0; player < porpoise::pad::kMaxPlayers; ++player)
         g_frame_pads[next][player] = porpoise::pad::snapshot(player);
+    merge_ns2gc(g_frame_pads[next][0]);
     g_frame_pads_now.store(next, std::memory_order_release);
 }
 
@@ -776,13 +917,56 @@ float RETRO_CALLCONV get_sensor_input(unsigned port, unsigned id)
     }
 }
 
-/* Which device each port gets: GameCube pads, or the chosen Wii controller. */
-unsigned port_device(int)
+/* ---- real Wii Remotes (a DolphinBar) --------------------------------------------------
+ * The Dolphin core's Wii Remote scanner and each Remote's threads call the
+ * title's hidapi (porpoise_usbhid.cpp). What it finds and loses goes to
+ * /data/porpoise/dolphinbar.log (porpoise_dolphinbar.cpp), a file of its own:
+ * those threads outlive the core's log. /data/porpoise/dolphinbar-detach (an
+ * empty file the player makes) has the console's driver detached from the
+ * DolphinBar's interfaces, should it have them; nothing does that unasked. */
+void dolphinbar_log(const char *line) { porpoise::dolphinbar::log("%s", line); }
+
+void start_dolphinbar_log()
+{
+    porpoise::dolphinbar::route_usbhid_log();
+    const bool detach = access(PORPOISE_DATA "/dolphinbar-detach", F_OK) == 0;
+    porpoise::usbhid::set_detach_kernel_driver(detach);
+    dolphinbar_log(detach ? "Porpoise: real Wii Remotes; the console's driver is detached from the DolphinBar "
+                            "(dolphinbar-detach)"
+                          : "Porpoise: real Wii Remotes");
+}
+bool nunchuk_device(int controller);
+
+/* Which device each port gets: GameCube pads, real Wii Remotes (a DolphinBar)
+ * in every port, or that player's Wii controller (4.5 Beta 4: each player's own). */
+unsigned port_device(int port)
 {
     if (!h.wii.active)
         return RETRO_DEVICE_JOYPAD;
-    return h.wii.motion_plus ? porpoise::pad::wii_device_with_motion_plus(h.wii.controller)
-                             : porpoise::pad::wii_device(h.wii.controller);
+    if (h.wii.real_remotes)
+        return porpoise::pad::kRealWiiRemoteDevice;
+    const int controller = porpoise::pad::for_player(h.wii, port).controller;
+    return h.wii.motion_plus ? porpoise::pad::wii_device_with_motion_plus(controller)
+                             : porpoise::pad::wii_device(controller);
+}
+
+/* Two controllers: player 2's DualSense is player 1's Nunchuk, so port 1 has no
+ * Remote of its own (real Wii Remotes: every port has one). */
+bool nunchuk_port(int port)
+{
+    return port == 1 && h.wii.active && !h.wii.real_remotes && h.wii.controller == porpoise::pad::WiiTwoControllers;
+}
+
+/* Some player's Remote has the Nunchuk: player 1's, or a player who's here
+ * (one whose saved choice has it but who never joined changes nothing). */
+bool any_nunchuk()
+{
+    if (h.wii.real_remotes)
+        return false; /* a real Nunchuk is the Remote's own */
+    for (int p = 0; p < porpoise::pad::kMaxPlayers; ++p)
+        if ((p == 0 || h.plugged[p]) && nunchuk_device(porpoise::pad::for_player(h.wii, p).controller))
+            return true;
+    return false;
 }
 
 /* A line for the debug folder's motion.csv: what the controller felt and
@@ -948,7 +1132,7 @@ void set_core_option(const char *key, const char *value)
 /* Called once a frame; leave = a change of controller: start over. */
 void nunchuk_motion_step(bool leave = false)
 {
-    const bool want = h.wii.active && h.wii.motion && nunchuk_device(h.wii.controller);
+    const bool want = h.wii.active && h.wii.motion && any_nunchuk();
     if (leave && (h.nunchuk_stage == 1 || h.nunchuk_stage == 2))
     {
         set_core_option("dolphin_save_load_settings", "disabled");
@@ -1037,12 +1221,13 @@ int16_t input_state(unsigned port, unsigned device, unsigned index, unsigned id)
     if (player == 0 && h.hold_input)
         return 0;
     const bool two = h.wii.active && h.wii.controller == porpoise::pad::WiiTwoControllers;
-    if (two && port > 0)
-        return 0; /* both controllers are player 1's Remote and Nunchuk */
+    if (two && port == 1)
+        return 0; /* the first two controllers are player 1's Remote and Nunchuk */
     const porpoise::pad::State &pad = frame_pad(player);
     /* With two controllers the second is the Nunchuk: its buttons and stick. */
     const porpoise::pad::State &nunchuk_pad = frame_pad(1);
-    const std::uint16_t joypad = std::uint16_t(pad.joypad | (two ? nunchuk_pad.nunchuk : 0));
+    const bool with_nunchuk = two && port == 0; /* (players 3 and 4 have their own) */
+    const std::uint16_t joypad = std::uint16_t(pad.joypad | (with_nunchuk ? nunchuk_pad.nunchuk : 0));
     switch (device)
     {
     case RETRO_DEVICE_JOYPAD:
@@ -1071,7 +1256,7 @@ int16_t input_state(unsigned port, unsigned device, unsigned index, unsigned id)
         return 0;
     }
     case RETRO_DEVICE_ANALOG:
-        if (index == RETRO_DEVICE_INDEX_ANALOG_LEFT && two)
+        if (index == RETRO_DEVICE_INDEX_ANALOG_LEFT && with_nunchuk)
             return id == RETRO_DEVICE_ID_ANALOG_X ? nunchuk_pad.left_x : nunchuk_pad.left_y;
         {
             /* A stick turned around, for a game that moves the other way. */
@@ -1167,6 +1352,14 @@ void unload_core()
     if (h.library)
         ps5_core_dlclose(h.library);
     h.library = nullptr;
+    h.gba_set_keys = nullptr;
+    h.gba_get_frame = nullptr;
+    h.gba_set_web_server = nullptr;
+    h.gba_reset = nullptr;
+    h.gba_mix = nullptr;
+    h.gba_volume_fn = nullptr;
+    h.gba_request_fn = nullptr;
+    h.gba_route_fn = nullptr;
 }
 
 bool read_whole_file(const char *path, std::vector<unsigned char> &out)
@@ -1201,7 +1394,11 @@ void set_wii(const porpoise::pad::WiiConfig &config)
 {
     if (!h.wii.active)
         return;
-    const bool device_changed = config.controller != h.wii.controller || config.motion_plus != h.wii.motion_plus;
+    bool device_changed = config.motion_plus != h.wii.motion_plus || config.real_remotes != h.wii.real_remotes;
+    for (int p = 0; p < porpoise::pad::kMaxPlayers; ++p)
+        device_changed |= porpoise::pad::for_player(config, p).controller != porpoise::pad::for_player(h.wii, p).controller;
+    if (config.real_remotes && !h.wii.real_remotes)
+        start_dolphinbar_log();
     /* (the same device for the GameCube controller either way: re-plugged all the same, harmlessly) */
     h.wii = config;
     h.wii.active = true;
@@ -1336,6 +1533,122 @@ void set_stick_shape(int sensitivity, int deadzone)
     static constexpr float kDead[4] = {0.0f, 0.06f, 0.12f, 0.20f};
     h.stick_power = kPower[std::clamp(sensitivity, 0, 3)];
     h.stick_dead = kDead[std::clamp(deadzone, 0, 3)];
+}
+
+void gba_request(int port, int what, const std::string &path)
+{
+    if (port >= 0 && port < 4 && h.gba_request_fn && h.gba_who[port].load() >= -1 && !h.wii.active)
+        h.gba_request_fn(unsigned(port), what, path.c_str());
+}
+
+void toggle_gba_link(int port)
+{
+    if (port < 0 || port > 3 || !h.gba_request_fn || h.gba_who[port].load() < -1)
+        return;
+    const bool now = !h.gba_connected[port].load();
+    h.gba_connected[port].store(now);
+    h.gba_request_fn(unsigned(port), now ? 0 : 1, "");
+}
+
+bool gba_connected(int port)
+{
+    return port >= 0 && port < 4 && h.gba_connected[port].load();
+}
+
+void set_gba_rom(int port, const std::string &path, bool saves_beside)
+{
+    if (port < 0 || port > 3)
+        return;
+    std::lock_guard lock(h.gba_rom_lock);
+    h.gba_rom_pending[port] = path;
+    h.gba_rom_beside[port] = saves_beside;
+    h.gba_rom_sent[port] = false;
+}
+
+void set_gba_speaker(int port, bool on)
+{
+    if (port < 0 || port > 3)
+        return;
+    const bool was = h.gba_speaker_on[port].exchange(on);
+    if (was && !on && h.gba_route_fn)
+        h.gba_route_fn(unsigned(port), 0); /* back in the TV's sound */
+}
+
+void set_gba_volume(int port, int percent, bool muted)
+{
+    if (port >= 0 && port < 4)
+        h.gba_volume[port].store(muted ? 0u : unsigned(std::clamp(percent, 0, 100)) * 256u / 100u);
+}
+
+void reset_gba(int port)
+{
+    for (int p = 0; p < 4; ++p)
+        if ((port < 0 || port == p) && h.gba_reset && h.gba_who[p].load() >= -1 && !h.wii.active)
+            h.gba_reset(unsigned(p));
+}
+
+/* The page runs while a game has a GBA and the setting is on. */
+void update_gba_stream()
+{
+    unsigned ports = 0;
+    for (int p = 0; p < 4; ++p)
+        if (h.gba_who[p].load() >= -1)
+            ports |= 1u << p;
+    porpoise::gba_stream::set_ports(ports);
+    if (h.gba_web.load() && ports)
+        porpoise::gba_stream::start();
+    else
+        porpoise::gba_stream::stop();
+}
+
+void set_gba_controls(const int who[4])
+{
+    for (int p = 0; p < 4; ++p)
+    {
+        const int now = who ? std::clamp(who[p], -2, porpoise::pad::kMaxPlayers - 1) : -2;
+        const int was = h.gba_who[p].exchange(now);
+        if (was != now && h.gba_set_keys && was >= -1)
+            h.gba_set_keys(unsigned(p), 0); /* nothing left held on a GBA whose player changed */
+    }
+    update_gba_stream();
+}
+
+int gba_player(int port)
+{
+    return port >= 0 && port < 4 ? h.gba_who[port].load(std::memory_order_relaxed) : -2;
+}
+
+bool gba_frame(int port, std::vector<std::uint16_t> &pixels, unsigned &width, unsigned &height, unsigned &seq)
+{
+    /* The picture the game loop fetched (below); asking keeps it fetching. */
+    if (port < 0 || port > 3)
+        return false;
+    Host::GbaPicture &pic = h.gba_pic[port];
+    pic.tv_asked = h.frame_number;
+    if (!h.gba_get_frame || h.gba_who[port].load(std::memory_order_relaxed) < -1 || pic.count == 0 ||
+        pic.count == seq || pic.px.empty())
+        return false;
+    pixels = pic.px;
+    width = pic.w;
+    height = pic.h;
+    seq = pic.count;
+    return true;
+}
+
+void set_gba_web(bool on)
+{
+    h.gba_web.store(on);
+    update_gba_stream();
+}
+
+bool has_gba()
+{
+    if (!h.gba_get_frame || h.wii.active)
+        return false;
+    for (int p = 0; p < 4; ++p)
+        if (h.gba_who[p].load(std::memory_order_relaxed) >= -1)
+            return true;
+    return false;
 }
 
 void set_player1_port(int port)
@@ -1493,10 +1806,25 @@ Exit run_game(const char *game_path, const Paths &paths, const Hooks &hooks, con
     {
         ~ForgetHooks() { g_run_hooks = nullptr; }
     } forget_hooks;
+    /* The menus' controller test lets go of the DolphinBar before Dolphin can
+     * look for Wii Remotes, and may have it again once the game has ended. */
+    porpoise::dolphinbar::hold_for_game();
+    /* A real Wii Remote's HOME held for a second: the in-game menu. */
+    porpoise::usbhid::set_home_menu(true);
+    struct ReleaseDolphinBar
+    {
+        ~ReleaseDolphinBar()
+        {
+            porpoise::usbhid::set_home_menu(false);
+            porpoise::dolphinbar::release_after_game();
+        }
+    } release_dolphinbar;
     status("Loading Dolphin");
     mkdir(PORPOISE_APP "/porpoise", 0777);
     mkdir(paths.saves, 0777);
     h.log = std::fopen(paths.log, "w");
+    if (h.wii.real_remotes)
+        start_dolphinbar_log();
 
     ps5::debug::mark(game_path);
     {
@@ -1595,12 +1923,15 @@ Exit run_game(const char *game_path, const Paths &paths, const Hooks &hooks, con
     h.p1_port = h.wii.active ? 0 : std::clamp(h.p1_port_want.load(), 0, porpoise::pad::kMaxPlayers - 1);
     for (int port = 0; port < porpoise::pad::kMaxPlayers; ++port)
     {
-        const bool two = h.wii.active && h.wii.controller == porpoise::pad::WiiTwoControllers;
         const int player = player_of(unsigned(port));
-        h.plugged[port] = player == 0 || (porpoise::pad::connected(player) && !two);
+        /* Real Wii Remotes: all four ports wait for one, whoever has a DualSense. */
+        h.plugged[port] = player == 0 || (porpoise::pad::playing(player) && !nunchuk_port(port)) || h.wii.real_remotes;
         if (h.plugged[port])
             h.api.set_controller_port_device(unsigned(port), port_device(port));
     }
+    h.ports_real = h.wii.real_remotes;
+    if (h.wii.real_remotes && h.log)
+        std::fprintf(h.log, "[porpoise] real Wii Remotes in every port (DolphinBar)\n");
     if (h.wii.active && h.log)
         std::fprintf(h.log,
                      "[porpoise] Wii controller %d, pointer %d, grip %d, motion %s, shake %s, speed %d, screen %.1f x "
@@ -1661,8 +1992,29 @@ Exit run_game(const char *game_path, const Paths &paths, const Hooks &hooks, con
     if (h.hw.context_reset)
         h.hw.context_reset();
     ps5::debug::mark("core: context_reset done; running");
+    /* The GBA link's calls (patches/dolphin/gba-link.patch); a core without them has no GBA. */
+    h.gba_set_keys = reinterpret_cast<decltype(h.gba_set_keys)>(ps5_core_dlsym(h.library, "dolphin_gba_set_keys"));
+    h.gba_get_frame = reinterpret_cast<decltype(h.gba_get_frame)>(ps5_core_dlsym(h.library, "dolphin_gba_get_frame"));
+    h.gba_set_web_server =
+        reinterpret_cast<decltype(h.gba_set_web_server)>(ps5_core_dlsym(h.library, "dolphin_gba_set_web_server"));
+    /* Porpoise serves the GBA's page itself (gba_stream): the core's own stays off. */
+    if (h.gba_set_web_server)
+        h.gba_set_web_server(false);
+    h.gba_reset = reinterpret_cast<decltype(h.gba_reset)>(ps5_core_dlsym(h.library, "dolphin_gba_reset"));
+    h.gba_volume_fn = reinterpret_cast<decltype(h.gba_volume_fn)>(ps5_core_dlsym(h.library, "porpoise_gba_volume"));
+    h.gba_request_fn = reinterpret_cast<decltype(h.gba_request_fn)>(ps5_core_dlsym(h.library, "dolphin_gba_request"));
+    h.gba_route_fn = reinterpret_cast<decltype(h.gba_route_fn)>(ps5_core_dlsym(h.library, "porpoise_route_gba"));
+    for (auto &c : h.gba_connected)
+        c.store(true);
+    for (auto &pic : h.gba_pic)
+        pic = {};
     /* Only now, with no early way out left before the game runs: the thread
      * must stop before the core goes (it does, after the loop). */
+    /* Real Wii Remotes Dolphin connects to or takes off the game's ports (the
+     * patched core keeps them): the notices, and dolphinbar.log. */
+    using TakeWiimoteEvent = int (*)(int *, int *);
+    const auto take_wiimote_event =
+        reinterpret_cast<TakeWiimoteEvent>(ps5_core_dlsym(h.library, "porpoise_take_wiimote_event"));
     if (playback.controller_speakers)
     {
         /* The patched core hands each Remote's sound over; an older core
@@ -1673,6 +2025,41 @@ Exit run_game(const char *game_path, const Paths &paths, const Hooks &hooks, con
             porpoise::speaker::start(mix, rate);
         else
             ps5::debug::mark("core: no Remote speaker export in this core");
+    }
+    else if (playback.gba_speaker)
+    {
+        /* The GBA's sound on player 1's controller: the core keeps it out of the TV's once asked
+         * for it (porpoise_mix_gba). */
+        h.gba_mix = reinterpret_cast<decltype(h.gba_mix)>(ps5_core_dlsym(h.library, "porpoise_mix_gba"));
+        auto rate = reinterpret_cast<porpoise::speaker::RateFn>(ps5_core_dlsym(h.library, "porpoise_wiimote_speaker_rate"));
+        if (h.gba_mix && rate)
+        {
+            porpoise::speaker::start(
+                [](unsigned player, std::int16_t *stereo, std::size_t frames) -> std::size_t {
+                    /* The GBAs this player plays, on their controller (several: mixed). */
+                    std::size_t got = 0;
+                    std::int16_t more[2048];
+                    for (int port = 0; port < 4 && h.gba_mix; ++port)
+                    {
+                        if (h.gba_who[port].load(std::memory_order_relaxed) != int(player) ||
+                            !h.gba_speaker_on[port].load(std::memory_order_relaxed))
+                            continue;
+                        if (got == 0)
+                            got = h.gba_mix(unsigned(port), stereo, frames);
+                        else if (frames * 2 <= sizeof more / sizeof more[0])
+                        {
+                            const std::size_t n = h.gba_mix(unsigned(port), more, frames);
+                            for (std::size_t i = 0; i < n * 2; ++i)
+                                stereo[i] = std::int16_t(std::clamp(int(stereo[i]) + more[i], -32768, 32767));
+                        }
+                    }
+                    return got;
+                },
+                rate);
+            ps5::debug::mark("core: the GBA's sound on player 1's controller");
+        }
+        else
+            ps5::debug::mark("core: no GBA sound export in this core");
     }
     /* 2.1.2: the game's sound pulled from Dolphin's own mixer (porpoise_audio.hpp). */
     if (playback.audio_pull)
@@ -1692,7 +2079,18 @@ Exit run_game(const char *game_path, const Paths &paths, const Hooks &hooks, con
     /* Where a frame's time goes (the log every 10 s). */
     using PerfFn = unsigned (*)(double *, double *, double *);
     const auto perf_take = reinterpret_cast<PerfFn>(ps5_core_dlsym(h.library, "porpoise_perf_take"));
-    if (perf_take)
+    /* 4.6: the GPU's share, the shaders made while the game waited, one core or two. */
+    struct Perf2
+    {
+        double cpu_ms, cpu_max_ms, gpu_ms, gpu_wait_ms, shader_ms;
+        unsigned frames, shaders;
+        int single_core;
+    };
+    using Perf2Fn = unsigned (*)(Perf2 *, unsigned);
+    const auto perf_take2 = reinterpret_cast<Perf2Fn>(ps5_core_dlsym(h.library, "porpoise_perf_take2"));
+    if (perf_take2)
+        perf_take2(nullptr, 0); /* from now */
+    else if (perf_take)
         perf_take(nullptr, nullptr, nullptr); /* from now */
     if (const char *cpus = std::getenv("PORPOISE_VIDEO_THREAD_CPUS"))
     {
@@ -1739,6 +2137,7 @@ Exit run_game(const char *game_path, const Paths &paths, const Hooks &hooks, con
      * SET_SYSTEM_AV_INFO when a PAL game goes 50 -> 60), so the check below
      * compares against this, not against h.fps. */
     double paced_hz = content_hz();
+    unsigned virtual_seen = porpoise::vk::virtual_vblank_changes();
     pacer.start(paced_hz, "game");
     porpoise::framegen::begin_game(playback.debug_dir);
     /* The frame statistics' second (frame generation's and the detailed FPS
@@ -1746,6 +2145,17 @@ Exit run_game(const char *game_path, const Paths &paths, const Hooks &hooks, con
     long long stat_start = monotonic_ns(), stat_run_ns = 0, stat_run_max_ns = 0, stat_present_ns = 0,
               stat_pace_ns = 0, stat_misses_at = 0;
     unsigned stat_frames = 0;
+    /* The debug folder's performance (a line a second): the longest frame, the
+     * stutters, the speed, Dolphin's threads (porpoise_perf_take, taken each
+     * second and summed for the 10-second log). */
+    const long long game_start_ns = monotonic_ns();
+    long long sec_last_frame = 0, sec_worst_ns = 0;
+    int sec_stutters = 0;
+    unsigned long long sec_samples_at = 0;
+    unsigned sec_frames_shown = 0;
+    long long sec_audio_wait_at = 0;
+    double win_cpu = 0, win_gpu = 0, win_cpu_max = 0;
+    unsigned win_steps = 0;
     long long window_start = monotonic_ns();
     unsigned long long window_frames = 0, window_samples = 0;
     long long window_audio_wait_us = 0;
@@ -1765,10 +2175,21 @@ Exit run_game(const char *game_path, const Paths &paths, const Hooks &hooks, con
     for (;;)
     {
         const porpoise::pad::State &pad = porpoise::pad::poll();
+        for (int port = 0, connected = 0; take_wiimote_event && take_wiimote_event(&port, &connected);)
+        {
+            porpoise::dolphinbar::push_notice(port + 1, connected != 0);
+            porpoise::dolphinbar::log("Dolphin: a real Wii Remote %s the game's port %d", connected ? "connected to" : "taken off", port + 1);
+        }
+        {
+            /* An attachment plugged into or out of a real Remote: a notice. */
+            int iface = 0;
+            bool plugged = false;
+            while (porpoise::usbhid::take_attachment_event(iface, plugged))
+                porpoise::dolphinbar::push_attachment_notice(iface + 1, plugged, "");
+        }
         publish_frame_pads();
         log_motion();
         /* A controller that joins mid-game is plugged into its GameCube port. */
-        const bool two_controllers = h.wii.active && h.wii.controller == porpoise::pad::WiiTwoControllers;
         /* 4.0: Player 1's Port changed (the in-game menu): player 1's
          * controller goes into its new port, out of the old one. */
         if (!h.wii.active && h.p1_port_want.load() != h.p1_port)
@@ -1777,7 +2198,7 @@ Exit run_game(const char *game_path, const Paths &paths, const Hooks &hooks, con
             for (int port = 0; port < porpoise::pad::kMaxPlayers; ++port)
             {
                 const int player = player_of(unsigned(port));
-                const bool want = player == 0 || porpoise::pad::connected(player);
+                const bool want = player == 0 || porpoise::pad::playing(player);
                 if (want != h.plugged[port])
                 {
                     h.plugged[port] = want;
@@ -1787,16 +2208,22 @@ Exit run_game(const char *game_path, const Paths &paths, const Hooks &hooks, con
             ps5::debug::mark_value("core: player 1 in GameCube port", h.p1_port + 1);
         }
         for (int port = 0; port < porpoise::pad::kMaxPlayers; ++port)
-            if (!h.plugged[port] && porpoise::pad::connected(player_of(unsigned(port))) && !two_controllers)
+            if (!h.plugged[port] && porpoise::pad::playing(player_of(unsigned(port))) && !nunchuk_port(port))
             {
                 h.plugged[port] = true;
                 h.api.set_controller_port_device(unsigned(port), port_device(port));
                 ps5::debug::mark_value("core: a controller joined; player", port + 1);
+                /* Their Remote has the Nunchuk: its motion is set up again,
+                 * with their port in it. */
+                if (h.wii.active && port > 0 &&
+                    nunchuk_device(porpoise::pad::for_player(h.wii, player_of(unsigned(port))).controller))
+                    nunchuk_motion_step(true);
                 if (h.log)
                     std::fprintf(h.log, "[porpoise] player %d joined\n", port + 1);
             }
-        /* Options + touch pad: the in-game menu, which pauses the game. */
-        const bool combo = pad.ps_menu_combo;
+        /* Options + touch pad, or a real Wii Remote's HOME held: the in-game
+         * menu, which pauses the game. */
+        const bool combo = pad.ps_menu_combo || porpoise::usbhid::take_home_hold() || porpoise::ns2gc::take_home_press();
         const bool combo_pressed = combo && !combo_was;
         combo_was = combo;
         if (h.hold_input && pad.buttons == 0)
@@ -1886,6 +2313,7 @@ Exit run_game(const char *game_path, const Paths &paths, const Hooks &hooks, con
                     }
                 }
                 /* Quick resume: the game as it was left, for next time. */
+                const long long resume_from = monotonic_ns();
                 if (keep_resume)
                 {
                     const bool kept = save_state(resume_here);
@@ -1901,6 +2329,8 @@ Exit run_game(const char *game_path, const Paths &paths, const Hooks &hooks, con
                             std::remove((old.substr(0, old.size() - 6) + ".png").c_str());
                     }
                     ps5::debug::mark(kept ? "core: quick resume kept" : "core: quick resume could not be kept");
+                    ps5::debug::mark_value("core: closing: quick resume saved, ms",
+                                           int((monotonic_ns() - resume_from) / 1000000));
                 }
                 break;
             }
@@ -1975,9 +2405,15 @@ Exit run_game(const char *game_path, const Paths &paths, const Hooks &hooks, con
              * Two-controller play has only the Remote (port 0): the second
              * controller is its Nunchuk, not a second Remote. */
             h.wii_changed = false;
-            const bool two = h.wii.active && h.wii.controller == porpoise::pad::WiiTwoControllers;
+            /* Real Wii Remotes: every port takes one. Back to the DualSense from them: the
+             * ports without a controller are emptied. */
+            const bool was_real = h.ports_real;
+            h.ports_real = h.wii.real_remotes;
             for (int port = 1; port < porpoise::pad::kMaxPlayers; ++port)
-                if (two && h.plugged[port])
+                if (h.wii.real_remotes)
+                    h.plugged[port] = true; /* given its device below */
+                else if (h.plugged[port] &&
+                         (nunchuk_port(port) || (was_real && !porpoise::pad::playing(player_of(unsigned(port))))))
                 {
                     h.api.set_controller_port_device(unsigned(port), RETRO_DEVICE_NONE);
                     h.plugged[port] = false;
@@ -2002,8 +2438,85 @@ Exit run_game(const char *game_path, const Paths &paths, const Hooks &hooks, con
         porpoise::audio::set_fast_forward(runs > 1);
         const long long run_start = monotonic_ns();
         h.new_frame = false;
+        {
+            /* Each GBA: its player's GBA buttons (held with their GBA button, or always: direct)
+             * and the page's for that port; its volume; Reset GBA from its player or its page. */
+            static unsigned said_volume[4] = {~0u, ~0u, ~0u, ~0u};
+            bool reset_pressed[porpoise::pad::kMaxPlayers] = {}, link_pressed[porpoise::pad::kMaxPlayers] = {};
+            for (int p = 0; p < porpoise::pad::kMaxPlayers; ++p)
+            {
+                const bool held = !(p == 0 && h.hold_input) && frame_pad(p).gba_reset;
+                reset_pressed[p] = held && !h.gba_reset_held[p];
+                h.gba_reset_held[p] = held;
+                const bool link = !(p == 0 && h.hold_input) && frame_pad(p).gba_disconnect;
+                link_pressed[p] = link && !h.gba_disconnect_held[p];
+                h.gba_disconnect_held[p] = link;
+            }
+            const bool web_on = h.gba_web.load(std::memory_order_relaxed);
+            for (int port = 0; port < 4 && !h.wii.active; ++port)
+            {
+                const int who = h.gba_who[port].load(std::memory_order_relaxed);
+                if (who < -1)
+                    continue;
+                /* Its volume: when it changes, and every two seconds (the mixer may be new). */
+                const unsigned volume = h.gba_volume[port].load(std::memory_order_relaxed);
+                if (h.gba_volume_fn && (volume != said_volume[port] || h.frame_number % 120 == 0))
+                {
+                    h.gba_volume_fn(unsigned(port), volume);
+                    said_volume[port] = volume;
+                }
+                if ((who >= 0 && reset_pressed[who]) || porpoise::gba_stream::take_reset(port))
+                    reset_gba(port);
+                if ((who >= 0 && link_pressed[who]) || porpoise::gba_stream::take_disconnect(port))
+                    toggle_gba_link(port);
+                /* Its game, once, as the game starts (the GBA starts over with it in). */
+                if (h.gba_request_fn && !h.gba_rom_sent[port] && h.frame_number > 2)
+                {
+                    std::lock_guard lock(h.gba_rom_lock);
+                    h.gba_rom_sent[port] = true;
+                    if (!h.gba_rom_pending[port].empty())
+                        h.gba_request_fn(unsigned(port), h.gba_rom_beside[port] ? 3 : 2,
+                                         h.gba_rom_pending[port].c_str());
+                }
+                if (h.gba_set_keys)
+                {
+                    const std::uint16_t pad_keys =
+                        who >= 0 && !(who == 0 && h.hold_input) ? frame_pad(who).gba_keys : 0;
+                    const std::uint16_t web = web_on ? porpoise::gba_stream::keys(port) : 0;
+                    h.gba_set_keys(unsigned(port), std::uint16_t(pad_keys | web));
+                }
+            }
+        }
         for (int i = 0; i < runs; ++i)
             h.api.run();
+        {
+            /* Each GBA's newest picture, once, for whoever shows it: the TV (asked in the last few
+             * frames) and the page in a browser. */
+            for (int port = 0; port < 4; ++port)
+            {
+                Host::GbaPicture &pic = h.gba_pic[port];
+                if (h.gba_who[port].load(std::memory_order_relaxed) < -1)
+                    continue;
+                const bool web = porpoise::gba_stream::want_frame(port);
+                const bool tv = h.frame_number - pic.tv_asked < 8;
+                /* A page that just started watching gets the picture there is (a still screen
+                 * sends no new one). */
+                if (web && !pic.web_was && pic.count > 0 && !pic.px.empty())
+                    porpoise::gba_stream::submit(port, pic.px.data(), pic.w, pic.h);
+                pic.web_was = web;
+                if (h.gba_get_frame && (web || tv))
+                {
+                    pic.px.resize(240 * 160);
+                    if (h.gba_get_frame(unsigned(port), pic.px.data(), pic.px.size(), &pic.w, &pic.h, &pic.core_seq))
+                    {
+                        if (++pic.count == 0)
+                            pic.count = 1;
+                        if (web)
+                            porpoise::gba_stream::submit(port, pic.px.data(), pic.w, pic.h);
+                    }
+                }
+            }
+        }
         {
             const long long run_ns = monotonic_ns() - run_start;
             window_run_ns += run_ns;
@@ -2079,6 +2592,13 @@ Exit run_game(const char *game_path, const Paths &paths, const Hooks &hooks, con
                 h.aspect = now_av.geometry.aspect_ratio;
             if (now_av.timing.fps > 10.0 && now_av.timing.fps < 200.0)
                 h.fps = now_av.timing.fps;
+            /* Frame generation turned on or off under VRR: the vblank the
+             * pacing waits on changed (its own clock, or none). */
+            if (porpoise::vk::virtual_vblank_changes() != virtual_seen)
+            {
+                virtual_seen = porpoise::vk::virtual_vblank_changes();
+                pacer.start(paced_hz, "game");
+            }
             if (std::fabs(content_hz() - paced_hz) > 0.5)
             {
                 char line[120];
@@ -2143,8 +2663,72 @@ Exit run_game(const char *game_path, const Paths &paths, const Hooks &hooks, con
             stat_present_ns += pace_start - present_start;
             stat_pace_ns += t - pace_start;
             ++stat_frames;
+            {
+                /* The frame's length, frame to frame (a gap of a second or more is
+                 * the menu, not a stutter). */
+                const long long budget_ns = static_cast<long long>(1e9 / std::max(10.0, paced_hz));
+                if (sec_last_frame)
+                {
+                    const long long d = t - sec_last_frame;
+                    if (d < 1'000'000'000LL)
+                    {
+                        sec_worst_ns = std::max(sec_worst_ns, d);
+                        if (d > budget_ns * 3 / 2)
+                            ++sec_stutters;
+                    }
+                }
+                sec_last_frame = t;
+                ++sec_frames_shown;
+            }
             if (t - stat_start >= 1'000'000'000LL)
             {
+                {
+                    const double secs = double(t - stat_start) / 1e9;
+                    double cpu_ms = 0, cpu_max_ms = 0, gpu_ms = 0;
+                    Perf2 p2{};
+                    unsigned steps = 0;
+                    if (perf_take2)
+                    {
+                        steps = perf_take2(&p2, sizeof p2);
+                        cpu_ms = p2.cpu_ms, cpu_max_ms = p2.cpu_max_ms, gpu_ms = p2.gpu_ms;
+                    }
+                    else if (perf_take)
+                        steps = perf_take(&cpu_ms, &cpu_max_ms, &gpu_ms);
+                    win_cpu += cpu_ms * steps;
+                    win_gpu += gpu_ms * steps;
+                    win_cpu_max = std::max(win_cpu_max, cpu_max_ms);
+                    win_steps += steps;
+                    const unsigned long long samples = h.samples_in - sec_samples_at;
+                    sec_samples_at = h.samples_in;
+                    porpoise::debuglog::PerfSecond ps;
+                    ps.t = float((t - game_start_ns) / 1e9);
+                    ps.fps = float(sec_frames_shown / secs);
+                    ps.game_hz = float(paced_hz);
+                    ps.speed = float(pulling ? 100.0 * stat_frames * runs / secs / (h.fps > 10.0 ? h.fps : 60.0)
+                                             : 100.0 * samples / secs / std::max(1.0, double(h.sample_rate)));
+                    ps.worst_ms = float(sec_worst_ns / 1e6);
+                    ps.stutters = sec_stutters;
+                    ps.cpu_ms = float(cpu_ms);
+                    ps.cpu_max_ms = float(cpu_max_ms);
+                    ps.gpu_ms = float(gpu_ms);
+                    ps.gpu_wait_ms = float(p2.gpu_wait_ms);
+                    ps.shader_ms = float(p2.shader_ms);
+                    ps.shaders = int(p2.shaders);
+                    ps.single_core = p2.single_core != 0;
+                    const double n = std::max(1.0, double(stat_frames));
+                    ps.run_ms = float(stat_run_ns / 1e6 / n);
+                    ps.present_ms = float(stat_present_ns / 1e6 / n);
+                    ps.pace_ms = float(stat_pace_ns / 1e6 / n);
+                    ps.misses = int(pacer.misses_total() - stat_misses_at);
+                    ps.audio_wait_ms = float((window_audio_wait_us - sec_audio_wait_at) / 1000.0 / secs);
+                    sec_audio_wait_at = window_audio_wait_us;
+                    ps.fast = runs > 1;
+                    if (rate_checked)
+                        porpoise::debuglog::perf_second(ps);
+                    sec_worst_ns = 0;
+                    sec_stutters = 0;
+                    sec_frames_shown = 0;
+                }
                 const double n = double(stat_frames);
                 const long long misses = pacer.misses_total();
                 porpoise::framegen::note_loop(stat_run_ns / 1e6 / n, stat_run_max_ns / 1e6, stat_present_ns / 1e6 / n,
@@ -2189,8 +2773,12 @@ Exit run_game(const char *game_path, const Paths &paths, const Hooks &hooks, con
             if (window_frames)
             {
                 const double n = double(window_frames);
-                double cpu_ms = 0, cpu_max_ms = 0, gpu_ms = 0;
-                const unsigned steps = perf_take ? perf_take(&cpu_ms, &cpu_max_ms, &gpu_ms) : 0;
+                /* (Dolphin's threads, from the seconds' takes) */
+                const double cpu_ms = win_steps ? win_cpu / win_steps : 0.0, cpu_max_ms = win_cpu_max,
+                             gpu_ms = win_steps ? win_gpu / win_steps : 0.0;
+                const unsigned steps = win_steps;
+                win_cpu = win_gpu = win_cpu_max = 0;
+                win_steps = 0;
                 std::fprintf(h.log,
                              "[porpoise] frame time: core %.1f ms (max %.1f; Dolphin's CPU thread %.1f ms, max %.1f, "
                              "video loop busy %.1f ms, %u steps), overlay %.1f ms, present %.1f ms, pacing %.1f ms\n",
@@ -2209,6 +2797,7 @@ Exit run_game(const char *game_path, const Paths &paths, const Hooks &hooks, con
             window_frames = 0;
             window_samples = h.samples_in;
             window_audio_wait_us = 0;
+            sec_audio_wait_at = 0;
             window_present_wait_ms = 0;
             window_run_ns = window_hook_ns = window_present_ns = window_pace_ns = 0;
             window_run_max_ns = 0;
@@ -2217,6 +2806,15 @@ Exit run_game(const char *game_path, const Paths &paths, const Hooks &hooks, con
 
     h.running = false;
     h.fast_forward = 1;
+    /* How long each part of closing takes, for the trace (closing felt slow). */
+    long long close_at = monotonic_ns();
+    auto close_step = [&](const char *what) {
+        const long long now = monotonic_ns();
+        char line[96];
+        std::snprintf(line, sizeof line, "core: closing: %s, %.0f ms", what, (now - close_at) / 1e6);
+        ps5::debug::mark(line);
+        close_at = now;
+    };
     porpoise::framegen::end_game();
     porpoise::mic::close_all(); /* no game listening any more */
     porpoise::speaker::stop();   /* before the core and its mixer go */
@@ -2224,6 +2822,7 @@ Exit run_game(const char *game_path, const Paths &paths, const Hooks &hooks, con
     porpoise::audio::set_pull_paused(false);
     porpoise::audio::set_fast_forward(false);
     porpoise::audio::flush();
+    close_step("sound and extras stopped");
     porpoise::vk::close();
     /* Everything Porpoise made on the core's device goes before the core
      * takes the device down with it. */
@@ -2232,12 +2831,24 @@ Exit run_game(const char *game_path, const Paths &paths, const Hooks &hooks, con
     porpoise::vk::close_device();
     if (h.hw.context_destroy)
         h.hw.context_destroy();
+    close_step("graphics closed");
     /* An unlock still on its way gets a few seconds before the game goes. */
     porpoise::ra::finish_game(h.library, 5000);
+    close_step("achievements");
+    porpoise::ns2gc::set_rumble(false);
+    if (h.ports_real)
+        dolphinbar_log(("Porpoise: the game ends; what was seen:\n" + porpoise::usbhid::describe()).c_str());
     h.api.unload_game();
+    close_step("Dolphin stopped the game");
     porpoise::ra::end_game();
+    if (h.ports_real)
+        dolphinbar_log("Porpoise: the game is unloaded, Dolphin closes (its Wii Remote threads end)");
     h.api.deinit();
+    close_step("Dolphin shut down");
     unload_core();
+    close_step("core unloaded");
+    if (h.ports_real)
+        dolphinbar_log("Porpoise: Dolphin closed");
     ps5::debug::mark("core: game closed");
     if (h.log)
         std::fclose(h.log);

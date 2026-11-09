@@ -8,6 +8,7 @@
 #include "ui_settings.hpp"
 
 #include "porpoise_atomic.hpp"
+#include "ui_theme.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -59,6 +60,10 @@ const Field kFields[] = {
     {"color_saturation", &Settings::color_saturation, nullptr, 0, 10},
     {"color_contrast", &Settings::color_contrast, nullptr, 0, 10},
     {"color_warmth", &Settings::color_warmth, nullptr, 0, 10},
+    {"crop_left", &Settings::crop_left, nullptr, 0, 20},
+    {"crop_right", &Settings::crop_right, nullptr, 0, 20},
+    {"crop_top", &Settings::crop_top, nullptr, 0, 20},
+    {"crop_bottom", &Settings::crop_bottom, nullptr, 0, 20},
     {"enh_advanced", nullptr, &Settings::enh_advanced, 0, 1},
     {"fps_overlay", nullptr, &Settings::fps_overlay, 0, 1},
     {"shader_mode", &Settings::shader_mode, nullptr, 0, 3},
@@ -83,6 +88,7 @@ const Field kFields[] = {
     {"fg_log", nullptr, &Settings::fg_log, 0, 1},
     {"fps_detail", nullptr, &Settings::fps_detail, 0, 1},
     {"output_res", &Settings::output_res, nullptr, 0, 3},
+    {"refresh_mode", &Settings::refresh_mode, nullptr, 0, 1},
     {"fast_states", nullptr, &Settings::fast_states, 0, 1},
     {"quick_resume", nullptr, &Settings::quick_resume, 0, 1},
     {"volume", &Settings::volume, nullptr, 0, 10},
@@ -95,6 +101,22 @@ const Field kFields[] = {
     {"button_layout", &Settings::button_layout, nullptr, 0, 5},
     {"invert_main", &Settings::invert_main, nullptr, 0, 3},
     {"p1_port", &Settings::p1_port, nullptr, 0, 3},
+    {"gc_port1_device", &Settings::gc_port1_device, nullptr, 0, 2},
+    {"gc_port2_device", &Settings::gc_port2_device, nullptr, 0, 2},
+    {"gc_port3_device", &Settings::gc_port3_device, nullptr, 0, 2},
+    {"gc_port4_device", &Settings::gc_port4_device, nullptr, 0, 2},
+    {"gba_buttons_on", nullptr, &Settings::gba_buttons_on, 0, 1},
+    {"gba_web", nullptr, &Settings::gba_web, 0, 1},
+    {"gba_port1_control", &Settings::gba_port1_control, nullptr, 0, 5},
+    {"gba_port2_control", &Settings::gba_port2_control, nullptr, 0, 5},
+    {"gba_port3_control", &Settings::gba_port3_control, nullptr, 0, 5},
+    {"gba_port4_control", &Settings::gba_port4_control, nullptr, 0, 5},
+    {"gba_buttons_use", &Settings::gba_buttons_use, nullptr, 0, 2},
+    {"gba_modifier", &Settings::gba_modifier, nullptr, 0, porpoise::pad::CtlCount - 1},
+    {"gba_stick_dpad", nullptr, &Settings::gba_stick_dpad, 0, 1},
+    {"gba_show_mode", &Settings::gba_show_mode, nullptr, 0, 2},
+
+    {"gba_always", nullptr, &Settings::gba_always, 0, 1},
     {"invert_c", &Settings::invert_c, nullptr, 0, 3},
     {"stick_sensitivity", &Settings::stick_sensitivity, nullptr, 0, 3},
     {"stick_deadzone", &Settings::stick_deadzone, nullptr, 0, 3},
@@ -126,6 +148,8 @@ const Field kFields[] = {
     {"wii_online", nullptr, &Settings::wii_online, 0, 1},
     {"online_custom", nullptr, &Settings::online_custom, 0, 1},
     {"online_https", nullptr, &Settings::online_https, 0, 1},
+    {"wii_source", &Settings::wii_source, nullptr, 0, 1},
+    {"real_wiimote_speaker", nullptr, &Settings::real_wiimote_speaker, 0, 1},
     {"wii_controller", &Settings::wii_controller, nullptr, 0, 5},
     {"wii_pointer", &Settings::wii_pointer, nullptr, 0, 2},
     {"wii_speed", &Settings::wii_speed, nullptr, 0, 10},
@@ -133,6 +157,18 @@ const Field kFields[] = {
     {"wii_motion", nullptr, &Settings::wii_motion, 0, 1},
     {"wii_shake", nullptr, &Settings::wii_shake, 0, 1},
     {"wii_motion_plus", &Settings::wii_motion_plus, nullptr, 0, 2},
+    {"wii_move", nullptr, &Settings::wii_move, 0, 1},
+    {"ps3_eye", nullptr, &Settings::ps3_eye, 0, 1},
+    {"move_color", &Settings::move_color, nullptr, 0, 7},
+    {"wii_swing", &Settings::wii_swing, nullptr, 20, 150},
+    {"wii_nunchuk_hand", &Settings::wii_nunchuk_hand, nullptr, 0, 1},
+    {"wii_nav", nullptr, &Settings::wii_nav, 0, 1},
+    {"wii_p2_hold", &Settings::wii_p2_hold, nullptr, 0, 3},
+    {"wii_p3_hold", &Settings::wii_p3_hold, nullptr, 0, 3},
+    {"wii_p4_hold", &Settings::wii_p4_hold, nullptr, 0, 3},
+    {"wii_p2_as", &Settings::wii_p2_as, nullptr, 0, 6},
+    {"wii_p3_as", &Settings::wii_p3_as, nullptr, 0, 6},
+    {"wii_p4_as", &Settings::wii_p4_as, nullptr, 0, 6},
     {"wii_invert_x", nullptr, &Settings::wii_invert_x, 0, 1},
     {"wii_invert_y", nullptr, &Settings::wii_invert_y, 0, 1},
     {"wii_screen_x", &Settings::wii_screen_x, nullptr, 0, 900},
@@ -147,12 +183,16 @@ const Field kFields[] = {
     {"wii_distance", &Settings::wii_distance, nullptr, 5, 250},
     {"wii_preset", &Settings::wii_preset, nullptr, 0, 4},
     {"motion_readout", nullptr, &Settings::motion_readout, 0, 1},
-    {"debug_logs", nullptr, &Settings::debug_logs, 0, 1},
+    {"debug_log_folder", nullptr, &Settings::debug_logs, 0, 1}, /* (was debug_logs: older builds saved it off) */
     {"developer", nullptr, &Settings::developer, 0, 1},
     {"all_settings", nullptr, &Settings::all_settings, 0, 1},
     {"beta_updates", nullptr, &Settings::beta_updates, 0, 1},
     {"perf_profile", nullptr, &Settings::perf_profile, 0, 1},
     {"setup_checked", nullptr, &Settings::setup_checked, 0, 1},
+    {"welcome_45", nullptr, &Settings::welcome_45, 0, 1},
+    {"hide_duplicates", nullptr, &Settings::hide_duplicates, 0, 1},
+    {"auto_picks", nullptr, &Settings::auto_picks, 0, 1},
+    {"menu_haptics", nullptr, &Settings::menu_haptics, 0, 1},
     {"motion_logs", nullptr, &Settings::motion_logs, 0, 1},
     {"cpu_clock", &Settings::cpu_clock, nullptr, 0, 9},
     {"dual_core", nullptr, &Settings::dual_core, 0, 1},
@@ -166,9 +206,11 @@ const Field kFields[] = {
     {"progressive", nullptr, &Settings::progressive, 0, 1},
     {"reduced_motion", nullptr, &Settings::reduced_motion, 0, 1},
     {"large_text", nullptr, &Settings::large_text, 0, 1},
-    {"ui_theme", &Settings::ui_theme, nullptr, 0, 18},
+    {"ui_theme", &Settings::ui_theme, nullptr, 0, 19},
+    {"ui_mode", &Settings::ui_mode, nullptr, 0, 2},
+    {"glass_layout", &Settings::glass_layout, nullptr, 0, 1},
     {"ui_palette", &Settings::ui_palette, nullptr, 0, 23},
-    {"ui_font", &Settings::ui_font, nullptr, 0, 8},
+    {"ui_font", &Settings::ui_font, nullptr, 0, 9},
     {"lib_view", &Settings::lib_view, nullptr, 0, 9},
     {"recent_dock", nullptr, &Settings::recent_dock, 0, 1},
     {"recent_style", &Settings::recent_style, nullptr, 0, 3},
@@ -193,9 +235,25 @@ bool is_dolphin_key(const std::string &key)
     return key.rfind("dolphin.", 0) == 0 && key.find('.', 8) != std::string::npos;
 }
 
+/* Players 2..4's GBA layouts (gba_p2_buttons, gba_p3_modifier, ...) and the GBAs' windows
+ * (gba_window1..4 = "x y"). */
+bool is_gba_extra_key(const std::string &key)
+{
+    if (key.size() == 11 && key.rfind("gba_window", 0) == 0)
+        return key[10] >= '1' && key[10] <= '4';
+    if (key.size() == 8 && key.rfind("gba_rom", 0) == 0)
+        return key[7] >= '1' && key[7] <= '4';
+    if (key.size() < 8 || key.rfind("gba_p", 0) != 0 || key[5] < '2' || key[5] > '4' || key[6] != '_')
+        return false;
+    const std::string what = key.substr(7);
+    return what == "buttons" || what == "buttons2" || what == "use" || what == "modifier" || what == "stick" ||
+           what == "always";
+}
+
 bool is_text_key(const std::string &key)
 {
-    return key == "border" || key == "online_dns" || is_dolphin_key(key);
+    return key == "border" || key == "online_dns" || key == "gba_buttons" || key == "gba_buttons2" ||
+           is_gba_extra_key(key) || is_dolphin_key(key);
 }
 
 const Field *field(const std::string &key)
@@ -234,6 +292,7 @@ const char *on_off(bool v)
 /* Values the Dolphin core expects, in the order Porpoise lists them. */
 const char *const kCpuClocks[] = {"0.50", "0.60", "0.70", "0.80", "0.90", "1.00", "1.50", "2.00", "2.50", "3.00"};
 const char *const kTextureCache[] = {"128", "512", "0"};
+const char *const kPortDevices[] = {"controller", "gba", "none"};
 /* English first; the core numbers Japanese 0. */
 const int kLanguages[] = {1, 0, 2, 3, 4, 5, 6, 7, 8, 9};
 
@@ -257,6 +316,9 @@ const char *const kManaged[] = {
     /* Off at every launch: Porpoise turns it on itself for two-controller play
      * (porpoise_core.cpp, nunchuk_motion_step). */
     "dolphin_save_load_settings",
+    /* The GameCube ports' devices and the GBA link (patches/dolphin/gba-link.patch). */
+    "dolphin_si_device_port1", "dolphin_si_device_port2", "dolphin_si_device_port3", "dolphin_si_device_port4",
+    "dolphin_gba_combos",
 };
 } // namespace
 
@@ -306,7 +368,7 @@ bool Settings::load(const std::string &path, bool overlay)
                 online_dns = v; /* the console's setting: never a game's own */
             continue;
         }
-        if (is_dolphin_key(k))
+        if (is_dolphin_key(k) || is_gba_extra_key(k))
         {
             set(k, v);
             continue;
@@ -317,10 +379,10 @@ bool Settings::load(const std::string &path, bool overlay)
             if (overlay)
                 continue;
             WiiPreset &w = wii_presets[k[9] - '1'];
-            int n[9] = {};
-            const int got = std::sscanf(v.c_str(), "%d %d %d %d %d %d %d %d %d", &n[0], &n[1], &n[2], &n[3], &n[4],
-                                        &n[5], &n[6], &n[7], &n[8]);
-            if (got == 9)
+            int n[11] = {0, 0, 0, 0, 5, 0, 0, 1, 100, 0, 70};
+            const int got = std::sscanf(v.c_str(), "%d %d %d %d %d %d %d %d %d %d %d", &n[0], &n[1], &n[2], &n[3],
+                                        &n[4], &n[5], &n[6], &n[7], &n[8], &n[9], &n[10]);
+            if (got >= 9)
             {
                 w.used = true;
                 w.name = std::clamp(n[0], 0, int(wii_preset_names().size()) - 1);
@@ -332,6 +394,8 @@ bool Settings::load(const std::string &path, bool overlay)
                 w.screen_y = std::clamp(n[6], 0, 900);
                 w.smooth = std::clamp(n[7], 0, 3);
                 w.reach = std::clamp(n[8], 50, 200);
+                w.move = n[9] ? 1 : 0;
+                w.swing = std::clamp(n[10], 20, 150);
             }
             continue;
         }
@@ -351,6 +415,32 @@ bool Settings::load(const std::string &path, bool overlay)
                 row[i] = std::clamp(int(n), 0, porpoise::pad::CtlCount - 1);
                 c = end;
             }
+            continue;
+        }
+        if (k == "gba_buttons" || k == "gba_buttons2")
+        {
+            int *const target = k == "gba_buttons" ? gba_buttons : gba_buttons2;
+            /* The GBA's buttons: a control for each, in porpoise::pad::GbaInput order. */
+            int row[porpoise::pad::GbaCount];
+            std::copy(target, target + porpoise::pad::GbaCount, row);
+            const char *c = v.c_str();
+            bool ok = true;
+            /* Fewer (an older Porpoise, before Move GBA Screen): the rest keep their defaults. */
+            for (int i = 0; i < porpoise::pad::GbaCount && ok; ++i)
+            {
+                char *end = nullptr;
+                const long n = std::strtol(c, &end, 10);
+                if (end == c)
+                    break;
+                ok = n >= -1 && n < porpoise::pad::CtlCount; /* -1: not on any control */
+                if (ok)
+                {
+                    row[i] = int(n);
+                    c = end;
+                }
+            }
+            if (ok) /* anything else (damaged) keeps what there was */
+                std::copy(std::begin(row), std::end(row), target);
             continue;
         }
         const bool second_set = k.size() == 13 && k.rfind("wiibuttons2_", 0) == 0 && k[12] >= '1' && k[12] <= '4';
@@ -442,6 +532,25 @@ bool Settings::load(const std::string &path, bool overlay)
     /* 18 (3.0 Alpha 7): Recently Played has looks; off stays off. */
     if (!overlay && version < 18)
         recent_style = recent_dock ? 1 : 0;
+    /* 19 (4.1): four themes - the new Porpoise, Porpoise Classic, Revolution and
+     * Star Cube. Porpoise's look moves to the new one once (Classic is a choice
+     * away); a theme no longer offered moves to it too, OLED as its OLED mode and
+     * the light ones as its light mode. */
+    if (!overlay && versioned && version < 19)
+    {
+        if (ui_theme == 2)
+            ui_mode = 1;
+        else if (ui_theme == 9 || ui_theme == 12 || ui_theme == 16)
+            ui_mode = 2;
+        if (ui_theme == 0 || !porpoise::ui::theme_offered(ui_theme))
+        {
+            ui_theme = int(porpoise::ui::ThemeId::Glass);
+            ui_palette = 0;
+            ui_font = 0;
+        }
+    }
+    if (!overlay && !porpoise::ui::theme_offered(ui_theme))
+        ui_theme = int(porpoise::ui::ThemeId::Glass);
     /* 2.1.1: the widescreen hack switch became the Widescreen choice; on, it
      * is On (the hack for games with no code of their own). Per game too. */
     if (!saw_wide && legacy_wide >= 0)
@@ -460,9 +569,12 @@ bool Settings::load(const std::string &path, bool overlay)
     /* 4.0: the release has no developer options, debug logs or performance
      * report; a setting left on by a test build goes off. */
     developer = false;
-    debug_logs = false;
-    perf_profile = false;
-    motion_readout = motion_logs = fps_detail = fg_debug_view = fg_log = false;
+    /* (Move test builds: Debug Logs stay as chosen, on to begin with: the motion,
+     * game and app logs are what the tests are for. The release turns them off
+     * here again.) */
+    if (!debug_logs)
+        perf_profile = false; /* (the profiler: with the debug logs, for a report on a slow game) */
+    motion_readout = fps_detail = fg_debug_view = fg_log = false;
     wii_invert_x = wii_invert_y = false;
     return true;
 }
@@ -472,7 +584,7 @@ bool Settings::save(const std::string &path) const
     std::FILE *f = open_atomic(path);
     if (!f)
         return false;
-    std::fprintf(f, "# Porpoise settings (written by the Settings screen)\nsettings_version = 18\n");
+    std::fprintf(f, "# Porpoise settings (written by the Settings screen)\nsettings_version = 19\n");
     for (const Field &fd : kFields)
         write_field(f, *this, fd);
     std::fprintf(f, "border = %s\n", border.c_str());
@@ -484,6 +596,22 @@ bool Settings::save(const std::string &path) const
             std::fprintf(f, " %d", presets[p][i]);
         std::fprintf(f, "\n");
     }
+    std::fprintf(f, "gba_buttons =");
+    for (int i = 0; i < porpoise::pad::GbaCount; ++i)
+        std::fprintf(f, " %d", gba_buttons[i]);
+    std::fprintf(f, "\ngba_buttons2 =");
+    for (int i = 0; i < porpoise::pad::GbaCount; ++i)
+        std::fprintf(f, " %d", gba_buttons2[i]);
+    std::fprintf(f, "\n");
+    for (int p = 2; p <= 4; ++p)
+        for (const char *what : {"buttons", "buttons2", "use", "modifier", "stick", "always"})
+        {
+            const std::string k = "gba_p" + std::to_string(p) + "_" + what;
+            std::fprintf(f, "%s = %s\n", k.c_str(), get(k).c_str());
+        }
+    for (int w = 1; w <= 4; ++w)
+        for (const std::string k : {"gba_window" + std::to_string(w), "gba_rom" + std::to_string(w)})
+            std::fprintf(f, "%s = %s\n", k.c_str(), get(k).c_str());
     for (int s = 0; s < kWiiButtonSets; ++s)
     {
         std::fprintf(f, "wiibuttons%d =", s + 1);
@@ -502,8 +630,8 @@ bool Settings::save(const std::string &path) const
     {
         const WiiPreset &w = wii_presets[p];
         if (w.used)
-            std::fprintf(f, "wiipreset%d = %d %d %d %d %d %d %d %d %d\n", p + 1, w.name, w.controller, w.grip,
-                         w.pointer, w.speed, w.screen_x, w.screen_y, w.smooth, w.reach);
+            std::fprintf(f, "wiipreset%d = %d %d %d %d %d %d %d %d %d %d %d\n", p + 1, w.name, w.controller, w.grip,
+                         w.pointer, w.speed, w.screen_x, w.screen_y, w.smooth, w.reach, w.move, w.swing);
     }
     for (const std::string &folder : folders)
         std::fprintf(f, "folder = %s\n", folder.c_str());
@@ -532,6 +660,8 @@ bool Settings::save_keys(const std::string &path, const std::vector<std::string>
             std::fprintf(f, "border = %s\n", border.c_str());
         else if (k == "online_dns")
             std::fprintf(f, "online_dns = %s\n", online_dns.c_str());
+        else if (k == "gba_buttons" || k == "gba_buttons2" || is_gba_extra_key(k))
+            std::fprintf(f, "%s = %s\n", k.c_str(), get(k).c_str());
         else if (is_dolphin_key(k) && !get(k).empty())
             std::fprintf(f, "%s = %s\n", k.c_str(), get(k).c_str());
     }
@@ -729,6 +859,82 @@ bool Settings::migrate_game_file(const std::string &path, Settings &global)
 
 bool Settings::set(const std::string &key, const std::string &value)
 {
+    if (is_gba_extra_key(key))
+    {
+        auto numbers = [&](int *out, int count, int lo, int hi) {
+            const char *c = value.c_str();
+            for (int i = 0; i < count; ++i)
+            {
+                char *end = nullptr;
+                const long n = std::strtol(c, &end, 10);
+                if (end == c)
+                    break;
+                out[i] = std::clamp(int(n), lo, hi);
+                c = end;
+            }
+        };
+        if (key.rfind("gba_rom", 0) == 0)
+        {
+            /* "0|1 name": saves beside it, then the file's name (spaces and all). */
+            const int w = key[7] - '1';
+            gba_rom_beside[w] = !value.empty() && value[0] == '1';
+            gba_rom[w] = value.size() > 2 ? value.substr(2) : "";
+            return true;
+        }
+        if (key.rfind("gba_window", 0) == 0)
+        {
+            /* x y size opacity volume muted filter blend speaker smooth; fewer (an older Porpoise)
+             * keep the rest. */
+            const int w = key[10] - '1';
+            int v[10] = {gba_window_x[w],      gba_window_y[w],      gba_window_size[w],
+                         gba_window_opacity[w], gba_window_volume[w], gba_window_muted[w] ? 1 : 0,
+                         gba_window_filter[w],  gba_window_blend[w] ? 1 : 0, gba_window_speaker[w] ? 1 : 0,
+                         gba_window_smooth[w]};
+            numbers(v, 10, -1, 1920);
+            gba_window_filter[w] = std::clamp(v[6], 0, 1);
+            gba_window_blend[w] = v[7] > 0;
+            gba_window_speaker[w] = v[8] > 0;
+            gba_window_smooth[w] = std::clamp(v[9], 0, 1);
+            gba_window_x[w] = v[0];
+            gba_window_y[w] = std::min(v[1], 1080);
+            gba_window_size[w] = std::clamp(v[2], 0, 3);
+            gba_window_opacity[w] = std::clamp(v[3], 0, 6);
+            gba_window_volume[w] = std::clamp(v[4], 0, 10);
+            gba_window_muted[w] = v[5] > 0;
+            return true;
+        }
+        GbaLayout &l = gba_more[key[5] - '2'];
+        const std::string what = key.substr(7);
+        if (what == "buttons")
+            numbers(l.buttons, porpoise::pad::GbaCount, -1, porpoise::pad::CtlCount - 1);
+        else if (what == "buttons2")
+            numbers(l.buttons2, porpoise::pad::GbaCount, -1, porpoise::pad::CtlCount - 1);
+        else if (what == "use")
+            numbers(&l.use, 1, 0, 2);
+        else if (what == "modifier")
+            numbers(&l.modifier, 1, 0, porpoise::pad::CtlCount - 1);
+        else if (what == "always")
+            l.always = as_bool(value);
+        else
+            l.stick_dpad = as_bool(value);
+        return true;
+    }
+    if (key == "gba_buttons" || key == "gba_buttons2")
+    {
+        /* A control for each GBA input, as the settings file has them; fewer keep the rest. */
+        int *const target = key == "gba_buttons" ? gba_buttons : gba_buttons2;
+        const char *c = value.c_str();
+        for (int i = 0; i < porpoise::pad::GbaCount; ++i)
+        {
+            char *end = nullptr;
+            const long n = std::strtol(c, &end, 10);
+            if (end == c)
+                break;
+            target[i] = std::clamp(int(n), -1, porpoise::pad::CtlCount - 1);
+            c = end;
+        }
+        return true;
+    }
     if (key == "border")
     {
         border = value;
@@ -804,6 +1010,50 @@ void Settings::copy_keys(const Settings &from, const std::vector<std::string> &k
 
 std::string Settings::get(const std::string &key) const
 {
+    if (is_gba_extra_key(key))
+    {
+        if (key.rfind("gba_window", 0) == 0)
+        {
+            const int w = key[10] - '1';
+            return std::to_string(gba_window_x[w]) + " " + std::to_string(gba_window_y[w]) + " " +
+                   std::to_string(gba_window_size[w]) + " " + std::to_string(gba_window_opacity[w]) + " " +
+                   std::to_string(gba_window_volume[w]) + " " + (gba_window_muted[w] ? "1" : "0") + " " +
+                   std::to_string(gba_window_filter[w]) + " " + (gba_window_blend[w] ? "1" : "0") + " " +
+                   (gba_window_speaker[w] ? "1" : "0") + " " + std::to_string(gba_window_smooth[w]);
+        }
+        if (key.rfind("gba_rom", 0) == 0)
+        {
+            const int w = key[7] - '1';
+            return std::string(gba_rom_beside[w] ? "1 " : "0 ") + gba_rom[w];
+        }
+        const GbaLayout &l = gba_more[key[5] - '2'];
+        const std::string what = key.substr(7);
+        auto list = [](const int *v) {
+            std::string out;
+            for (int i = 0; i < porpoise::pad::GbaCount; ++i)
+                out += (i ? " " : "") + std::to_string(v[i]);
+            return out;
+        };
+        if (what == "buttons")
+            return list(l.buttons);
+        if (what == "buttons2")
+            return list(l.buttons2);
+        if (what == "use")
+            return std::to_string(l.use);
+        if (what == "modifier")
+            return std::to_string(l.modifier);
+        if (what == "always")
+            return l.always ? "1" : "0";
+        return l.stick_dpad ? "1" : "0";
+    }
+    if (key == "gba_buttons" || key == "gba_buttons2")
+    {
+        const int *const from = key == "gba_buttons" ? gba_buttons : gba_buttons2;
+        std::string v;
+        for (int i = 0; i < porpoise::pad::GbaCount; ++i)
+            v += (i ? " " : "") + std::to_string(from[i]);
+        return v;
+    }
     if (key == "border")
         return border;
     if (key == "online_dns")
@@ -844,6 +1094,8 @@ void Settings::save_wii_preset(int slot, int name)
     w.screen_y = wii_screen_y;
     w.smooth = wii_smooth;
     w.reach = wii_reach;
+    w.move = wii_move ? 1 : 0;
+    w.swing = wii_swing;
     wii_preset = slot + 1;
 }
 
@@ -860,6 +1112,8 @@ bool Settings::use_wii_preset(int slot)
     wii_screen_y = w.screen_y;
     wii_smooth = w.smooth;
     wii_reach = w.reach;
+    wii_move = w.move != 0;
+    wii_swing = w.swing;
     wii_preset = slot + 1;
     return true;
 }
@@ -897,8 +1151,34 @@ porpoise::pad::WiiConfig Settings::wii_config(bool active, const std::string &ga
         c.range = ranges[std::clamp(wii_range, 0, 3)];
     }
     c.bar_above = sensor_bar == 1; /* where the game is told the bar is: the pointer's lights agree */
+    /* The Move is the Remote (alone or with the Nunchuk); the other Wii controllers
+     * are played on the DualSense. */
+    c.move = wii_move && (c.controller == porpoise::pad::WiiRemote || c.controller == porpoise::pad::WiiRemoteNunchuk);
+    c.swing = std::clamp(wii_swing, 20, 150);
+    c.nunchuk_right = c.move && c.controller == porpoise::pad::WiiRemoteNunchuk && wii_nunchuk_hand == 1;
+    c.navigation = c.move && c.controller == porpoise::pad::WiiRemoteNunchuk && wii_nav;
+    /* Players 2 to 4. */
+    {
+        const int holds[3] = {wii_p2_hold, wii_p3_hold, wii_p4_hold}, as[3] = {wii_p2_as, wii_p3_as, wii_p4_as};
+        for (int p = 1; p < porpoise::pad::kMaxPlayers; ++p)
+        {
+            c.hold[p] = std::clamp(holds[p - 1], 0, int(porpoise::pad::HoldCount) - 1);
+            c.as[p] = std::clamp(as[p - 1], 0, int(porpoise::pad::WiiControllerCount)) - 1;
+        }
+    }
     c.invert_x = developer && wii_invert_x; /* developer options only */
     c.invert_y = developer && wii_invert_y;
+    /* Real Wii Remotes (a DolphinBar): every port is a real Remote, which
+     * brings its own motion, pointer, MotionPlus and attachments; the
+     * DualSense's take no part (a plain Remote, so no two-controller play and
+     * no Nunchuk motion file). Only in a game: the home screen's pointer
+     * stays the DualSense's. */
+    if (active && wii_source == 1)
+    {
+        c.real_remotes = true;
+        c.controller = porpoise::pad::WiiRemote;
+        c.motion = c.shake = c.motion_plus = false;
+    }
     return c;
 }
 
@@ -1063,6 +1343,13 @@ std::vector<std::pair<std::string, std::string>> Settings::core_options() const
         /* Dolphin's own yellow notes over the game ("Saved to memory card"
          * and the like): Porpoise shows what matters in its own menus. */
         {"dolphin_osd_enabled", "disabled"},
+        /* The GameCube ports, as Dolphin's own Controllers setting. The GBA's buttons are
+         * Porpoise's (porpoise::pad::GbaConfig), so the core's own combos are off. */
+        {"dolphin_si_device_port1", kPortDevices[std::clamp(gc_port1_device, 0, 2)]},
+        {"dolphin_si_device_port2", kPortDevices[std::clamp(gc_port2_device, 0, 2)]},
+        {"dolphin_si_device_port3", kPortDevices[std::clamp(gc_port3_device, 0, 2)]},
+        {"dolphin_si_device_port4", kPortDevices[std::clamp(gc_port4_device, 0, 2)]},
+        {"dolphin_gba_combos", "disabled"},
     };
 }
 
@@ -1099,5 +1386,34 @@ bool Settings::write_core_options(const std::string &options_ini) const
         return false;
     std::fputs(text.c_str(), f);
     return finish_atomic(f, options_ini);
+}
+
+porpoise::pad::GbaConfig Settings::gba_player_config(int player) const
+{
+    GbaLayoutRef l = const_cast<Settings *>(this)->gba_layout(player);
+    porpoise::pad::GbaConfig c;
+    c.modifier = std::clamp(*l.modifier, 0, porpoise::pad::CtlCount - 1);
+    c.stick_dpad = *l.stick_dpad;
+    c.direct = *l.always; /* always the GBA: no GBA button to hold */
+    const int *buttons = *l.use == 2 ? l.buttons2 : *l.use == 1 ? l.buttons : nullptr;
+    if (buttons) /* Porpoise's own: GbaConfig's defaults */
+        for (int i = 0; i < porpoise::pad::GbaCount; ++i)
+            c.control[i] = static_cast<std::int8_t>(std::clamp(buttons[i], -1, porpoise::pad::CtlCount - 1));
+    return c;
+}
+
+bool Settings::port_has_gba(int port) const
+{
+    const int ports[] = {gc_port1_device, gc_port2_device, gc_port3_device, gc_port4_device};
+    return port >= 0 && port < 4 && ports[port] == 1;
+}
+
+int Settings::gba_port() const
+{
+    const int ports[] = {gc_port1_device, gc_port2_device, gc_port3_device, gc_port4_device};
+    for (int i = 0; i < 4; ++i)
+        if (ports[i] == 1)
+            return i;
+    return -1;
 }
 } // namespace porpoise

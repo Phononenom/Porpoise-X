@@ -10,10 +10,6 @@
 </p>
 
 <p align="center">
-  <a href="https://recompstore.com/game/PPSA99764"><img alt="Get it on RecompStore" src="https://recompstore.com/assets/press/badge-dark.svg" height="56"></a>
-</p>
-
-<p align="center">
   <b>Porpoise</b> is a GameCube and Wii emulator for jailbroken PS5, built on
   <a href="https://dolphin-emu.org">Dolphin</a>, with its own launcher for the TV and the DualSense.
 </p>
@@ -39,18 +35,18 @@ graphics go through Vulkan on Mesa's RADV driver.
 It plays your own GameCube and Wii disc backups. It doesn't include any games,
 BIOS or firmware files.
 
-### New in 4.0
-- **Frame Generation (beta):** a 30 fps game shown at 60, or a 60 fps game at
-  120 with the PS5 at 120 Hz. **Steady 30 FPS** for games that swing between
-  30 and 60.
-- **Simpler Settings** with **Show All Settings** for everything, and **Auto
-  Boost**: a game's best PS5 settings in one press.
-- A calmer **Porpoise** theme, and **Star Cube** redone after the GameCube's
-  menu.
-- **Change Disc** in the in-game menu, **Player 1's Port**, and the **Smooth
-  Edges (FXAA)** filter.
-- Smoother quick saves, games with big shader caches that start again, and a
-  long list of fixes. The full list is in the [changelog](CHANGELOG.md).
+### New in 4.5
+- **A new look** built around your collection: disc cases you move through
+  with the stick, in Light, Dark or OLED, with a side menu (Triangle) and the
+  island (swipe down on the touch pad).
+- **PlayStation Move as the Wii Remote**, with a PS3 Eye to keep your aim
+  from drifting, and the **Controller Hub** to set up what you hold and what
+  it plays as.
+- **Up to four players** in Wii games; the Navigation controller and players
+  2 to 4's Moves through REXCRAFT88's Move Management.
+- **Triforce arcade games (beta)**, see [below](#triforce-arcade-games-beta).
+- **Refresh Rate:** Fixed 120 Hz or VRR, with Frame Generation working under
+  both. The full list is in the [changelog](CHANGELOG.md).
 
 ## Features
 
@@ -119,6 +115,30 @@ BIOS or firmware files.
 - **Your own buttons for each Wii controller:** Settings → Controls →
   Customize buttons, then L1 / R1 to pick Remote + Nunchuk, Remote, Sideways
   or Classic.
+
+### Game Boy Advance on the link cable (beta)
+For GameCube games that link to a GBA: The Wind Waker's Tingle Tuner, Four
+Swords Adventures, Pac-Man Vs. and others. The GBA is Dolphin's own (mGBA).
+- **Settings → GameCube Ports:** set a port to **GBA (Integrated)**. It needs
+  the GBA BIOS as `/data/porpoise/saves/User/GBA/gba_bios.bin`.
+- **Settings → GBA:** who plays each GBA (player 1 to 4 holding their GBA
+  button, the port's own controller with no button held, or nobody), its game,
+  and its screen and sound.
+- **On the controller:** hold the GBA button (L3 unless you change it) and the
+  controller is the GBA. **Customize GBA Buttons** has a layout for each
+  player, and buttons to show, move and fade the GBA's screen, change its
+  volume, mute or reset it, pull its link cable, and quick save or load it.
+  **Always the GBA** is for a second controller that only plays a GBA.
+- **On the TV:** each GBA's screen over the game, in its own corner: 1x to 4x,
+  40% to 100% opaque, sharp or soft pixels, interframe blending.
+- **In a browser:** `http://<your PS5's address>:6771` shows a GBA's screen
+  and buttons (keyboard, gamepad or touch), and `/multi` shows several at once.
+  **GBA Web Page** turns it off.
+- **Sound:** each GBA's volume, mute, and its sound on its player's controller
+  speaker.
+- **In a game's menu:** reset the GBA, pull its link cable, change its game,
+  save and load its states (nine slots for each game), export and import its
+  save, and scan e-Reader cards.
 
 ### RetroAchievements (softcore)
 - **Your lists:** the in-game menu's **Achievements** tab shows every
@@ -195,7 +215,7 @@ need; **Show All Settings**, the first row, brings back every option.
 
 | Section | What's inside |
 |---|---|
-| **Video** | **Output resolution** (*Match the PS5* by default, or 1080p, 1440p, 4K), **Frame Generation** (beta) and **Steady 30 FPS**, **Widescreen** (see [Widescreen](#widescreen)), aspect ratio, **border**, FPS overlay, V-Sync |
+| **Video** | **Output resolution** (*Match the PS5* by default, or 1080p, 1440p, 4K), **Refresh Rate** (Fixed 120 Hz or VRR), **Frame Generation** (beta) and **Steady 30 FPS**, **Widescreen** (see [Widescreen](#widescreen)), aspect ratio, **border**, FPS overlay, V-Sync |
 | **Enhancements** | Internal resolution (1080p by default), anti-aliasing (MSAA/SSAA), anisotropic filtering, the **screen filter** and its strength, **Extra Bloom**; under **Advanced Options**, saturation, contrast and warmth, texture filtering, output resampling, per-pixel lighting, disable fog, custom texture packs and, per game, **graphics mods** (see [Graphics mods](#graphics-mods)) |
 | **Graphics** | Shader compilation (asynchronous ubershaders by default), build shaders before starting, threaded GPU recording (beta), texture cache accuracy, crop overscan, skip duplicate frames, quick resume (beta), fast save states |
 | **Audio** | Game volume and mute; **menu music** and **menu sounds**, each with its own switch and volume, and the **sound set** (Crisp, Soft or Porpoise's original); the **sound preset**, **audio buffer** and **fill audio gaps** (see [Sound](#sound)); and, in beta, **accurate audio**, the **Wii Remote speaker** (TV or controller) and the **microphone** |
@@ -312,18 +332,18 @@ Settings → Audio, for every game or one (and the in-game menu's **Audio** tab)
   (Mario Party 6 and 7: hold **R3** to talk) and the Wii Speak.
 
 ### Languages
-- **Sixteen languages**, each with its flag in the language list (Chinese
+- **Seventeen languages**, each with its flag in the language list (Chinese
   with its script's character instead): English,
   Español (España), **Español (Latinoamérica)**, Français, **Deutsch**,
   Italiano, **Nederlands**, **Polski**, Português (Portugal), **Português
-  (Brasil)**, **Türkçe**, **Русский**, **日本語**, **한국어**, **简体中文** and
+  (Brasil)**, **Svenska**, **Türkçe**, **Русский**, **日本語**, **한국어**, **简体中文** and
   **繁體中文**. Porpoise follows your PS5's system
   language, and **Settings → Interface → Language** overrides it.
 - Game descriptions from GameTDB come in Spanish, French, Portuguese, Italian,
   German and Dutch too, where GameTDB has them (English otherwise).
 - The translations are first drafts, and fixes are welcome. To fix a line
   without waiting for an update, create `/data/porpoise/lang/<code>.txt` —
-  `es`, `es-419`, `fr`, `pt`, `pt-BR`, `it`, `de`, `nl`, `pl`, `ru`, `tr`,
+  `es`, `es-419`, `fr`, `pt`, `pt-BR`, `it`, `de`, `nl`, `pl`, `ru`, `sv`, `tr`,
   `ja`, `ko`, `zh-Hans` or `zh-Hant` —
   with lines such as `Quit to library = Volver a la biblioteca`. In the source,
   translations live in [`i18n/`](i18n).
@@ -434,6 +454,16 @@ own console.
   icon. A `.dol` or `.elf` without a `meta.xml` beside it isn't listed.
 - **A game shows as GameCube but is a Wii game** (or the other way round)?
   Open its settings: **Controls → Console** sets it to GameCube or Wii.
+
+### Triforce arcade games (beta)
+The Triforce is the GameCube-based arcade board from Sega, Namco and Nintendo.
+Put the arcade games you dumped yourself in any games folder (`.gcm`, `.iso`,
+`.bin` or `.rvz`); they show in the library marked *Triforce* and start like any
+game. On the controller: **touch pad** inserts a coin, **L1** opens the test
+menu, **L3 + R3** is the service button. The test menu needs the board's own
+firmware, `segaboot.gcm`, from your own board, in `/data/porpoise/bios/`
+(Settings → About shows whether it's there). Arcade support comes from Dolphin
+and is still young: some games don't run yet.
 
 ### Your own BIOS and Wii Menu (beta)
 - **GameCube boot animation:** copy the BIOS (`IPL.bin`) you dumped from your
@@ -594,13 +624,18 @@ becomes the next player, up to four, and can join in the middle of a game.
 | `/data/porpoise/saves/User/Wii/backups/` | Wii saves you backed up from Memory Cards |
 | `/data/porpoise/latest-release.json` | What GitHub last said about the newest release |
 | `/data/porpoise/lang/` | Your own translation fixes (optional) |
-| `/data/porpoise/bios/` | Your own GameCube BIOS, under any name (optional) |
+| `/data/porpoise/bios/` | Your own GameCube BIOS, under any name, and the Triforce's `segaboot.gcm` (optional) |
+| `/data/porpoise/saves/User/Triforce/` | The arcade board's settings and each arcade game's backup data |
 | `/data/porpoise/screenshots/` | Your screenshots, a folder for each game |
 | `/data/porpoise/cheats/` | Your own cheat codes, one `<game ID>.ini` per game (optional) |
 | `/data/porpoise/retroachievements.ini` | Your RetroAchievements sign-in token (not your password) |
 | `/data/porpoise/achievements/` | Each game's achievement list as of your last play, and the badges |
 | `/data/porpoise/location.txt` | Where Porpoise's folder is, after you moved it to another drive |
 | `/data/porpoise/cache/` | The menus' lettering, made once at the first start |
+| `/data/porpoise/games/gba/port1/` … `port4/` | Each GBA's games, and its saves when kept beside the game |
+| `/data/porpoise/games/gba/portN/exports/` | A GBA's states (`<game>.ss1` to `.ss9`) and exported saves |
+| `/data/porpoise/games/gba/ereader/` | e-Reader cards (`.raw`) |
+| `/data/porpoise/saves/User/GBA/` | The GBA BIOS (`gba_bios.bin`) and the GBAs' saves |
 
 ## Troubleshooting
 
@@ -730,7 +765,8 @@ It stands on the work of many people. The full list, with licenses, is in
   **[VT323](https://github.com/google/fonts/tree/main/ofl/vt323)**,
   **[Doto](https://github.com/oliverlalan/Doto)**,
   **[Exo 2](https://github.com/googlefonts/Exo-2.0)**,
-  **[Lora](https://github.com/cyrealtype/Lora-Cyrillic)** (as Porpoise Serif) and
+  **[Lora](https://github.com/cyrealtype/Lora-Cyrillic)** (as Porpoise Serif),
+  **[Manrope](https://github.com/googlefonts/manrope)** and
   **[M PLUS 1](https://github.com/coz-m/MPLUS_FONTS)** (SIL OFL), and **[stb](https://github.com/nothings/stb)** by Sean Barrett.
 - **Warped Polygon**, for the GameCube widescreen code collection Porpoise's
   widescreen uses.

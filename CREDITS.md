@@ -5,8 +5,38 @@ Porpoise would not exist without the people and projects below. Thank you.
 ## Porpoise
 
 **Ruben ([@elripalda](https://ripalda.dev))**: creator. The idea, the
-design direction, the logo and artwork, the menu music and every sound effect,
+design direction, the logo and artwork, the controller diagrams in the Controller
+Hub, the menu music and every sound effect,
 and all of the testing on real hardware.
+
+### Menu music
+
+**LOiME**: "Soundscape", the new look's menu music (looped for Porpoise).
+Ruben's own menu music plays in the legacy looks.
+
+### PlayStation Move
+
+**[REXCRAFT88](https://github.com/REXCRAFT88)**: his Move Studio work and his
+Porpoise branch
+([feature/move-nav-integration](https://github.com/REXCRAFT88/Porpoise-Dolphin-Emulator-for-PS5/tree/feature/move-nav-integration))
+inspired and shaped Porpoise's Move calibration:
+
+- centering while holding still also clears the gyroscope's drift
+- the Move's motion starts fresh when it reconnects
+- the pointer snaps to the middle when it's centered
+- the center from the setup carries into the game
+- the PS3 Eye looks for the ball's own color, and leaves out the room's other
+  lights
+- the ball colors to choose from
+
+The Navigation controller (since 4.5 Beta 1) and players 2 to 4's Moves (4.5
+Beta 4) come through his
+[Move Management](https://github.com/REXCRAFT88/Move-Management-PS5), and
+Porpoise reads them with his input client, `src/porpoise_move_bridge.hpp`
+(GPL-3.0-or-later), taken from his work with his blessing.
+
+His research into the Move, the Navigation controller and the PS3 Eye is a big
+part of where Move support goes next.
 
 ### Contributors
 
@@ -67,6 +97,16 @@ Porpoise builds Dolphin from libretro/dolphin revision
 | [libnfs](https://github.com/sahlberg/libnfs) by Ronnie Sahlberg and contributors | Games on an NFS share, the same way (`src/porpoise_netfs.cpp`; the client library in `third_party/libnfs`) | LGPL-2.1-or-later; protocol files BSD-2-Clause |
 | Widescreen codes collected by **Warped Polygon** | The GameCube widescreen codes in `assets/widescreen` (cleaned by `tools/make-widescreen.py`), which play games in true 16:9 | the collection's own |
 | 16:9 codes for Virtual Console N64 games from **Admentus64**'s Enhancement Codes (with gamemasterplc and the codes' other authors) | Optional 16:9 codes in Cheats and Patches for the Wii's Virtual Console N64 games, in `assets/widescreen` | GPL-3.0 |
+
+## Controllers
+
+| Project | Role in Porpoise | License |
+|---|---|---|
+| [BlueV](https://github.com/0xZ3n0x/BlueV) by **0xZ3n0x** | Showed that a PS5 title can talk to USB devices through their `ugen` nodes, and the console's `USB_DEVICEINFO` number; Porpoise's own USB code (`src/porpoise_usbhid.cpp`, `src/porpoise_ns2gc.cpp`, `src/porpoise_bt.cpp`) follows that approach | reference only |
+| [SDL](https://github.com/libsdl-org/SDL)'s HIDAPI Switch 2 driver by **Valve Corporation** and the SDL contributors | The USB set-up of the Switch 2's GameCube controller, its flash calibration, its input report and rumble, as `src/porpoise_ns2gc.cpp` reimplements them | zlib (reference) |
+| [switch2_controller_research](https://github.com/ndeadly/switch2_controller_research) by **ndeadly** | The Switch 2 controllers' Bluetooth LE advertisements, GATT handles, commands and report formats | reference |
+| [switch2-controllers-linux](https://github.com/Nitrama/switch2-controllers-linux) by **Nitrama** | The Bluetooth set-up that brings the GameCube controller's input over a raw ATT channel, its pairing values and its rumble presets, as `src/porpoise_bt.cpp` reimplements them | MIT (reference) |
+| Linux's `btrtl` driver and [linux-firmware](https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git) | How a Realtek RTL8761B/C USB Bluetooth adapter is given its patch (reimplemented in `src/porpoise_bt.cpp`), and the patch files themselves, shipped unmodified in `assets/bluetooth` | GPL-2.0 (reference); Realtek's redistributable licence (`assets/bluetooth/LICENCE.rtlwifi_firmware.txt`) |
 
 ## The PS5 scene
 

@@ -97,6 +97,55 @@ Mapping preset(int layout);
 /* The bit in State::buttons for a control. */
 std::uint32_t control_bit(int control);
 
+/* ---- the integrated GBA (a GameCube port set to GBA), from a player's DualSense ------------ */
+
+/* The GBA's buttons, in mGBA's key-mask order (bit n = input n for the first
+ * ten), then Porpoise's own: show the GBA's screen on the TV. */
+enum GbaInput : int
+{
+    GbaA,
+    GbaB,
+    GbaSelect,
+    GbaStart,
+    GbaRight,
+    GbaLeft,
+    GbaUp,
+    GbaDown,
+    GbaR,
+    GbaL,
+    GbaShowScreen,
+    GbaMoveScreen,     /* held: the screen shows, and the left stick moves it */
+    GbaAdjustOpacity,  /* held: the screen shows, and the left stick (up / down) changes its opacity */
+    GbaReset,          /* pressed: the GBA starts over, the game goes on (as Dolphin's own) */
+    GbaMute,           /* pressed: the GBA's sound off, or on again */
+    GbaVolume,         /* held: the left stick (up / down) changes the GBA's volume */
+    GbaDisconnect,     /* pressed: the GBA's link cable out, or in again (as Dolphin's Disconnect) */
+    GbaQuickSave,      /* pressed: a GBA state in the first empty slot (1..9), else the oldest */
+    GbaQuickLoad,      /* pressed: the newest GBA state */
+    GbaCount,
+};
+constexpr int kGbaKeys = 10; /* the inputs that are GBA buttons */
+
+/* While the modifier is held, player 1's controls are the GBA's (and the game
+ * gets nothing from player 1); let go, they are the GameCube's again. */
+struct GbaConfig
+{
+    bool active = false;   /* a GameCube game with a GBA in a port, and GBA buttons on */
+    int modifier = CtlL3;  /* Control */
+    std::int8_t control[GbaCount] = {CtlCross, CtlSquare, CtlTouch, CtlOptions, CtlRight, CtlLeft,
+                                     CtlUp,    CtlDown,   CtlR1,    CtlL1,      CtlTriangle, CtlCircle,
+                                     CtlL2,    -1 /* Reset GBA: none until the player gives it one */,
+                                     -1 /* Mute */, CtlR2 /* Volume */, -1 /* Disconnect */,
+                                     -1 /* Quick Save */, -1 /* Quick Load */};
+    bool stick_dpad = false; /* the left stick is the GBA's D-pad too */
+    bool direct = false;     /* no GBA button: the player is the GBA (their port holds it) */
+};
+/* Porpoise's own GBA layout (GbaConfig's defaults). */
+GbaConfig gba_defaults();
+/* Each player's (0..3): a player whose GBA button is held (or direct) plays a GBA. */
+void set_gba(int player, const GbaConfig &config);
+GbaConfig gba(int player = 0);
+
 /* ---- the Wii Remote, from a DualSense --------------------------------------------------- */
 
 /* What a Wii game's port 0..3 is (the Dolphin core's libretro devices). */
@@ -109,6 +158,17 @@ enum WiiController : int
     WiiTwoControllers = 4, /* beta: controller 1 the Remote, controller 2 the Nunchuk */
     WiiGameCube = 5,      /* a GameCube controller in a Wii game that takes one (Brawl, Mario Kart Wii) */
     WiiControllerCount,
+};
+/* 4.5 Beta 4: what players 2 to 4 hold (player 1's is WiiConfig::move,
+ * navigation and controller, as before). A Move for players 2 to 4 comes from
+ * REXCRAFT88's Move Management (the PS5 itself reads one Move: player 1's). */
+enum WiiHolding : int
+{
+    HoldDualSense = 0,     /* their DualSense, as their Wii controller (WiiConfig::as) */
+    HoldMove = 1,          /* a Move, as the Remote */
+    HoldMoveNav = 2,       /* a Move and a Navigation controller, as the Remote and the Nunchuk */
+    HoldMoveDualSense = 3, /* a Move, and their DualSense as the Nunchuk */
+    HoldCount,
 };
 /* Where the Remote's pointer comes from. */
 enum WiiPointer : int
@@ -193,10 +253,39 @@ struct WiiConfig
      * (Zack & Wiki's top quarter was out of reach). */
     float range = 1.0f;
     bool bar_above = false; /* Settings > Console > Sensor Bar: the bar above the TV (else below) */
+    /* Settings > Wii Remote > Wii Remotes: real ones through a Mayflash
+     * DolphinBar (porpoise_usbhid.hpp) in every port, not the DualSense. The
+     * Remote's buttons, motion, pointer and attachments are then the real
+     * Remote's own; the DualSense still opens Porpoise's menu. */
+    bool real_remotes = false;
     /* Porpoise's own home screen points with it (the Revolution look): R1 and
      * L1 stay menu buttons, centre_now() centres. */
     bool menu = false;
+    /* Move test builds: a PlayStation Move is player 1's Remote (its motion the
+     * pointer's, measured by the Wii Remote Setup); the DualSense the Nunchuk. */
+    bool move = false;
+    /* With the Move: the DualSense (the Nunchuk) held in the right hand, the
+     * Move in the left. Its right stick is the Nunchuk's, R1 / R2 are C / Z,
+     * and the face buttons the D-pad (the right hand has none). */
+    bool nunchuk_right = false;
+    /* With the Move: the Nunchuk is a Navigation controller, from REXCRAFT88's
+     * Move Management. The DualSense still works alongside. */
+    bool navigation = false;
+    /* How hard the Move's swings come out, percent of how hard they were (its
+     * motion as the game feels it, gravity kept: tilting is unchanged). */
+    int swing = 100;
+    /* Players 2 to 4 (index 1..3; [0] isn't used): what each holds
+     * (WiiHolding), and what their DualSense plays as (a WiiController, or
+     * -1 the same as player 1's). Everything else - the pointer's speed,
+     * steadiness, swing strength - is player 1's for everyone. */
+    int hold[kMaxPlayers] = {0, 0, 0, 0};
+    int as[kMaxPlayers] = {-1, -1, -1, -1};
 };
+/* One player's own set-up: player 1's is config itself; players 2 to 4 take
+ * player 1's and put their own controller in. With two controllers (player 1's
+ * Remote and Nunchuk on two DualSense) player 2's DualSense is player 1's
+ * Nunchuk: player 2 gets player 1's set-up, as before. */
+WiiConfig for_player(const WiiConfig &config, int player);
 void set_wii(const WiiConfig &config);
 /* The player's own Wii buttons: for each of the four sets (wii_button_set),
  * the control that does what Porpoise's layout puts on control i. */
@@ -223,6 +312,9 @@ int expected_pose(const WiiConfig &config, bool second = false);
 
 /* The libretro device a Wii game's port gets for a WiiController. */
 unsigned wii_device(int controller);
+/* The Dolphin core's real Wii Remote (Input.cpp: RETRO_DEVICE_REAL_WIIMOTE):
+ * the port's Remote is a real one, found by Dolphin's scanner. */
+constexpr unsigned kRealWiiRemoteDevice = (6u << 8) | 0u /* RETRO_DEVICE_NONE */;
 /* The core's device for the controller with a Wii MotionPlus on it (the same
  * when the controller can't take one). */
 unsigned wii_device_with_motion_plus(int controller);
@@ -267,18 +359,36 @@ struct State
     std::int16_t l2 = 0, r2 = 0; /* the GameCube L and R analog, 0..0x7fff */
     /* Raw buttons this poll, for Porpoise's own shortcuts and screens. */
     bool ps_menu_combo = false; /* Options + touch pad: open the Porpoise menu */
+    bool move = false;          /* player 1 is the PlayStation Move */
+    unsigned move_holds = 0;    /* times the Move's Start has been held (a second): the in-game menu, the pointer */
     bool ff_step = false;       /* touch pad + R1 pressed: fast forward's next speed */
     bool ff_hold = false;       /* touch pad + R2 held: fast forward while held */
     bool quick_save = false;    /* touch pad + L1 pressed: save to the quick slot (set_quick_buttons) */
     bool quick_load = false;    /* touch pad + L2 pressed: load the quick slot */
     bool screenshot = false;    /* touch pad + Square pressed: a screenshot (set_shot_buttons) */
     std::uint32_t buttons = 0;  /* Button bits */
+    /* The GBA (set_gba), this player's: */
+    bool gba_held = false;      /* the modifier is down: the controls are the GBA's */
+    std::uint16_t gba_keys = 0; /* mGBA's key mask (GbaA..GbaL = bits 0..9) */
+    bool gba_show = false;      /* the show-the-screen control is held (with the modifier) */
+    /* Move GBA Screen held (with the modifier): the screen shows and the left stick moves it
+     * (and isn't the GBA's D-pad then). */
+    bool gba_moving = false;
+    bool gba_opacity = false; /* Adjust Opacity held: the left stick changes it (gba_move_*) */
+    bool gba_reset = false;   /* Reset GBA held */
+    bool gba_mute = false;    /* Mute GBA held */
+    bool gba_volume = false;  /* GBA Volume held: the left stick changes it (gba_move_*) */
+    bool gba_disconnect = false; /* Disconnect GBA held */
+    bool gba_quick_save = false, gba_quick_load = false; /* Quick Save / Load GBA State held */
+    std::int16_t gba_move_x = 0, gba_move_y = 0;
 };
 
 bool open();
 void close();
 void set_mapping(const Mapping &mapping);
 void set_rumble_enabled(bool enabled);
+/* 4.5: a light tick on player 1's controller for the menus (level 0..255, for ms). */
+void menu_tick(std::uint8_t level, int ms = 28);
 /* Touch pad + R1 / R2 for fast forward in games (Settings > Controls). Off:
  * the touch pad, R1 and R2 go to the game as they are. */
 void set_fast_forward_buttons(bool enabled);
@@ -304,6 +414,17 @@ const State &state(int player = 0);
 /* A copy taken under the lock, for the core's own thread. */
 State snapshot(int player);
 bool connected(int player);
+/* A player is here to play: their DualSense, or (4.5 Beta 4) the Move they
+ * hold in a Wii game. */
+/* The Controller Hub is showing the players: call every frame it's open (players
+ * 2 to 4's Moves are listened to outside Wii games while it is). */
+void watching_players();
+bool playing(int player);
+/* What a player's Move is doing (4.5 Beta 4): 0 not set up, 1 waiting for it,
+ * 2 the PS5's own (player 1's), 3 from Move Management. And their Navigation
+ * controller: 0 not set up, 1 waiting, 2 here. */
+int move_link(int player);
+int nav_link(int player);
 /* The PS5 user holding player's controller (-1 none): for its speaker. */
 std::int32_t user_of(int player);
 int connected_count();

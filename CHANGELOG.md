@@ -1,5 +1,77 @@
 # Changelog
 
+## Unreleased
+
+**New**
+- **Game Boy Advance on the link cable (beta):** a GameCube port set to GBA
+  (Integrated) is Dolphin's own GBA (mGBA, built into the core), for The Wind
+  Waker's Tingle Tuner, Four Swords Adventures and the other link games. Needs
+  the GBA BIOS (`/data/porpoise/saves/User/GBA/gba_bios.bin`).
+- **Settings → GBA:** who plays each GBA (a player with their GBA button, the
+  port's own controller, or nobody), its game (`games/gba/portN`), and each
+  GBA's own screen and sound.
+- **The GBA on the controller:** hold the GBA button (L3) and the controller is
+  the GBA. A GBA tab in Customize Buttons, with a layout for each player.
+- **The GBA's screen on the TV**, one for each GBA: move it, 1x to 4x, 40% to
+  100% opaque, sharp or soft pixels, interframe blending.
+- **The GBA in a browser:** `http://<PS5>:6771`, and `/multi` for several at
+  once, with keyboard, gamepad and touch buttons.
+- **GBA sound:** volume, mute, and the sound on the player's controller
+  speaker.
+- **In the in-game menu:** reset a GBA, pull its link cable, change its game,
+  nine save state slots for each game, save export and import, e-Reader cards.
+- **Real Wii Remotes through a Mayflash DolphinBar** (Settings → Wii Remote →
+  Wii Remotes → Real Wii Remotes): original Wii Remotes and Wii Remote Plus
+  controllers with the Nunchuk, Classic Controller and MotionPlus, IR,
+  rumble and speaker, for up to four players, in a USB port of the PS5.
+  See docs/DOLPHINBAR.md.
+- **Controllers & Accessories** (Settings): the DualSense controllers, the
+  DolphinBar and Wii Remotes 1–4 at a glance, a live controller test with a
+  diagnosis, and a speaker test.
+- **Porpoise's menus with a Wii Remote:** upright with a Nunchuk or sideways
+  without, with its own button prompts; HOME held for a second in a game
+  opens the in-game menu.
+- **Notices** when a Wii Remote or its Nunchuk is connected or taken off.
+- **The Switch 2's GameCube controller** (Nintendo Switch Online, 057E:2073):
+  by its USB cable, or without it through a USB Bluetooth adapter with a
+  Realtek RTL8761B/C (tested: TP-Link UB600). It is player 1's GameCube
+  controller beside the DualSense, with its analog triggers and rumble; it
+  works Porpoise's menus with its own button prompts, and HOME opens the
+  in-game menu. By Bluetooth it is paired once with its SYNC button and
+  then connects with any button. See docs/NSO-GAMECUBE.md.
+- **Controllers & Accessories** lists only what's plugged in.
+
+**Fixed**
+- A game no longer crashes when a real Wii Remote is switched off in it, and
+  a Remote switched on again connects again with a button press.
+
+## 4.5 — 2026-11-03
+
+The new Porpoise look (Light, Dark, OLED) with the side menu and the island;
+PlayStation Move as the Wii Remote (both models) with PS3 Eye drift
+correction; the Controller Hub, with a page for each of up to four players;
+the Navigation controller and players 2 to 4's Moves through REXCRAFT88's
+Move Management; Triforce arcade games (beta); Settings > Video > Refresh
+Rate (Fixed 120 Hz or VRR), frame generation under VRR, the menus at 120 Hz;
+every menu translated. See docs/release-notes-4.5.md.
+
+## 4.5 Beta 4 — 2026-11-01
+
+A beta: up to four players in Wii games. The Controller Hub has a page for
+each player (tap L1 / R1): what they hold (DualSense, PlayStation Move, Move +
+Navigation, Move + DualSense) and what their DualSense plays as. Players 2 to
+4's Moves, and the Navigation controller, connect through REXCRAFT88's Move
+Management. Saved for every Wii game.
+
+## 4.5 Beta 1 — 2026-10-26
+
+A beta: the new Porpoise look (Light, Dark, OLED) with the side menu
+(Triangle) and the island (swipe down on the touch pad); PlayStation Move as
+the Wii Remote with PS3 Eye drift correction; the Controller Hub; the
+Navigation controller as the Nunchuk through REXCRAFT88's Move Studio (alpha);
+Punch-Out!! at full speed and other speed work. See
+docs/release-notes-4.5-beta.1.md.
+
 ## 4.0 — 2026-10-21
 
 **New**

@@ -9,6 +9,7 @@
 #ifdef PORPOISE_DESKTOP
 #include "porpoise_platform.hpp"
 #endif
+#include "porpoise_debuglog.hpp"
 #include "porpoise_gfxmods.hpp"
 #include "porpoise_forwarders.hpp"
 #include "porpoise_paths.hpp"
@@ -21,10 +22,13 @@
 #include <pthread.h>
 #include <sys/stat.h>
 
+#include "porpoise_move.hpp"
 #include "porpoise_pad.hpp"
 #include "porpoise_update.hpp"
 #include "ui_widescreen.hpp"
 #include "ui_app.hpp"
+#include "porpoise_pacer.hpp"
+#include "porpoise_vk.hpp"
 
 #include "porpoise_nand.hpp"
 #include "porpoise_bios.hpp"
@@ -182,6 +186,7 @@ void App::make_forwarder()
     o.game_id = tile_key();
     o.art = porpoise::tileart::load(data_dir_, o.game_id);
     o.exit_after_game = fwd_exit_;
+    o.vrr = settings_->refresh_mode == 1;
     const porpoise::forwarders::Result r = porpoise::forwarders::make(data_dir_, o);
     if (r.ok)
         open_dialog(DialogKind::Info, tr("Home screen tile made"),
@@ -263,6 +268,10 @@ std::string App::save_report(std::string &usb)
     copy_file(PORPOISE_APP "/trace.txt", dir + "/trace.txt", 2u << 20);
     copy_file(PORPOISE_APP "/porpoise/core.log", dir + "/core.log", 2u << 20);
     copy_file(settings_path_, dir + "/settings.ini");
+    /* The PlayStation Move's own log: which controllers it looked at, and what it found. */
+    copy_file("/data/porpoise-move.txt", dir + "/move.txt", 2u << 20);
+    /* The debug folder's newest: the app log, crashes, the Controller Hub, the last game. */
+    const std::vector<std::string> debug_files = porpoise::debuglog::gather(dir);
     if (std::FILE *f = std::fopen((dir + "/about.txt").c_str(), "w"))
     {
         std::fprintf(f, "Porpoise %s\n", build_label().c_str());
@@ -287,8 +296,12 @@ std::string App::save_report(std::string &usb)
         if (mkdir(to.c_str(), 0777) != 0)
             continue;
         bool any = false;
-        for (const char *file : {"trace.txt", "core.log", "settings.ini", "about.txt"})
+        for (const char *file : {"trace.txt", "core.log", "settings.ini", "about.txt", "move.txt"})
             any |= copy_file(dir + "/" + file, to + "/" + file);
+        if (!debug_files.empty())
+            mkdir((to + "/debug").c_str(), 0777);
+        for (const std::string &file : debug_files)
+            copy_file(dir + "/" + file, to + "/" + file);
         if (any)
         {
             usb = "porpoise-" + name;
@@ -427,6 +440,85 @@ std::string App::game_settings_path(const Game &g) const
     return data_dir_ + "/game-settings/" + Library::settings_key_of(g) + ".ini";
 }
 
+/* 4.6: a game's Porpoise's Picks, put in its own settings by themselves: the
+ * first time it's played, and again when the picks change, as long as the
+ * player hasn't changed the game's settings (anything they set, or any picked
+ * value they moved, and it's theirs). What was applied is kept beside the
+ * game's settings (<game>.picks: key = value lines), to tell the two apart.
+ * Riptide Boost is never turned on this way. */
+void App::auto_apply_picks(const Game &g)
+{
+    if (!settings_->auto_picks || g.id.empty())
+        return;
+    recommend::Pick pick;
+    if (!recommend::pick_for(g.id, pick))
+        return;
+    std::vector<std::pair<std::string, std::string>> want;
+    for (const auto &kv : pick.values)
+        if (kv.first != "fast_float")
+            want.push_back(kv);
+    if (want.empty())
+        return;
+    const std::string path = game_settings_path(g);
+    const std::string mark = path.substr(0, path.size() - 4) + ".picks";
+    /* What was applied before. */
+    std::vector<std::pair<std::string, std::string>> had;
+    if (std::FILE *f = std::fopen(mark.c_str(), "r"))
+    {
+        char line[512];
+        while (std::fgets(line, sizeof line, f))
+        {
+            std::string l(line);
+            while (!l.empty() && (l.back() == '\n' || l.back() == '\r'))
+                l.pop_back();
+            const std::size_t eq = l.find(" = ");
+            if (eq != std::string::npos)
+                had.push_back({l.substr(0, eq), l.substr(eq + 3)});
+        }
+        std::fclose(f);
+    }
+    if (had == want)
+        return; /* (as applied already) */
+    std::vector<std::string> keys = Settings::keys_in(path);
+    Settings eff = *settings_;
+    eff.load(path, true);
+    /* The player's own: a key the picks didn't set, or a picked value since moved. */
+    for (const std::string &k : keys)
+    {
+        const auto it = std::find_if(had.begin(), had.end(), [&](const auto &kv) { return kv.first == k; });
+        if (it == had.end() || eff.get(k) != it->second)
+            return;
+    }
+    /* The old picks out, the new ones in. */
+    for (const auto &[k, v] : had)
+    {
+        if (k.rfind("dolphin.", 0) == 0)
+            eff.forget(k);
+        else
+            eff.set(k, settings_->get(k));
+        keys.erase(std::remove(keys.begin(), keys.end(), k), keys.end());
+    }
+    for (const auto &[k, v] : want)
+    {
+        eff.set(k, v);
+        if (std::find(keys.begin(), keys.end(), k) == keys.end())
+            keys.push_back(k);
+    }
+    mkdir((data_dir_ + "/game-settings").c_str(), 0777);
+    if (!eff.save_keys(path, keys))
+        return;
+    if (std::FILE *f = std::fopen(mark.c_str(), "w"))
+    {
+        for (const auto &[k, v] : want)
+            std::fprintf(f, "%s = %s\n", k.c_str(), v.c_str());
+        std::fclose(f);
+    }
+    std::string list;
+    for (const auto &[k, v] : want)
+        list += (list.empty() ? "" : ", ") + k + "=" + v;
+    porpoise::debuglog::app("picks: %s [%s]: %s", g.title.c_str(), g.id.c_str(), list.c_str());
+}
+
 /* ---- the rows ------------------------------------------------------------------------------ */
 
 /* Video, Graphics, Audio, Controls and System: the rows a game can change too. */
@@ -472,11 +564,36 @@ void App::add_game_rows(Settings &t, bool per_game)
                "output, so the TV doesn't switch modes when Porpoise opens. 1080p is the quickest; 1440p and 4K are "
                "sharper on a 4K TV with a high internal resolution. Takes effect the next time Porpoise starts.",
                &t.output_res, 0, {"Match the PS5", "1080p", "1440p", "4K"});
+    if (!per_game)
+        choice("refresh_mode", "Refresh Rate",
+               "Fixed 120 Hz: with the PS5 at 1440p or 4K on a 120 Hz TV, Porpoise runs at 120 Hz and Frame "
+               "Generation shows a 60 fps game at 120; the PS5's VRR stays off while Porpoise runs. VRR: each frame "
+               "shows the moment it's ready, with no judder when a game dips below full speed, up to 120 Hz; turn on "
+               "VRR and Apply to Unsupported Games in the PS5's Screen and Video settings. With Frame Generation on, "
+               "Porpoise keeps an even 120 Hz beat for it. Takes effect the next time Porpoise starts.",
+               &t.refresh_mode, 0, {"Fixed 120 Hz", "VRR (Beta)"});
+    if (!per_game)
+    {
+        /* What the TV is doing, as the frame pacing measured it. */
+        const double hz = porpoise::pacer::display_rate_hz();
+        SettingRow r;
+        r.section = section;
+        r.label = tr("Display");
+        r.help = tr("What your TV is running at. 120 Hz needs the PS5's Video Output resolution at 1440p or 4K "
+                    "and a 120 Hz TV. VRR needs Refresh Rate set to VRR, and VRR with Apply to Unsupported Games "
+                    "on in the PS5's Screen and Video settings.");
+        r.values = {porpoise::pacer::display_vrr() ? (porpoise::vk::own_high_rate() ? tr("VRR, up to 120 Hz")
+                                                                                     : tr("VRR, up to 60 Hz"))
+                    : hz > 100.0                    ? tr("120 Hz")
+                    : hz > 0.0                      ? tr("60 Hz")
+                                                    : tr("Not measured yet")};
+        rows_.push_back(r);
+    }
 #endif
 #ifndef PORPOISE_DESKTOP
     toggle("frame_gen", "Frame Generation (beta)",
-           "Makes a frame between each two of the game's: a 30 fps game is shown at 60, and with the PS5 set to "
-           "120 Hz a 60 fps game at 120. Adds a little lag and can smear fast motion. Needs V-Sync.",
+           "Makes a frame between each two of the game's: a 30 fps game is shown at 60, and at 120 Hz (see "
+           "Display) a 60 fps game at 120. Adds a little lag and can smear fast motion. Needs V-Sync, without VRR.",
            &t.frame_gen);
     toggle("fg_steady30", "Steady 30 FPS",
            "With Frame Generation on, the game's own frames are shown at an even 30 a second and frame generation "
@@ -518,6 +635,20 @@ void App::add_game_rows(Settings &t, bool per_game)
         r.text_value = &t.border;
         rows_.push_back(r);
     }
+    {
+        /* Crop: trims an edge of the game's picture, then fills the screen
+         * with what's left (thin black bars some games draw, or a border). */
+        static const std::vector<std::string> kCrop = {
+            "Off", "0.5%", "1%", "1.5%", "2%", "2.5%", "3%", "3.5%", "4%", "4.5%", "5%",
+            "5.5%", "6%", "6.5%", "7%", "7.5%", "8%", "8.5%", "9%", "9.5%", "10%"};
+        choice("crop_left", "Crop Left", "Trims the left edge of the picture. The in-game menu shows it as you change it.",
+               &t.crop_left, 0, kCrop);
+        choice("crop_right", "Crop Right", "Trims the right edge of the picture.", &t.crop_right, 0, kCrop);
+        choice("crop_top", "Crop Top", "Trims the top edge of the picture.", &t.crop_top, 0, kCrop);
+        choice("crop_bottom", "Crop Bottom", "Trims the bottom edge of the picture.", &t.crop_bottom, 0, kCrop);
+        toggle("crop_overscan", "Trim the Game's Black Edges",
+               "Dolphin hides the black borders some games draw at the edges.", &t.crop_overscan);
+    }
     toggle("fps_overlay", "FPS Overlay", "Shows the frame rate in the corner while you play.", &t.fps_overlay);
     toggle("vsync", "V-Sync",
            "Shows every frame on the TV's own refresh, for the smoothest motion. Off times frames with Porpoise's "
@@ -531,7 +662,7 @@ void App::add_game_rows(Settings &t, bool per_game)
      * options first; Advanced Options shows the rest (a view, the same for
      * every game). */
     header("Enhancements");
-    const bool advanced = settings_->enh_advanced;
+    const bool advanced = true; /* 4.5: every enhancement shown, under its tab */
     choice("resolution", "Internal Resolution", "How sharp games render. Higher is sharper and can slow some games.",
            &t.resolution, 1, {"1x (480p)", "2x (720p)", "3x (1080p)", "4x (1440p)",
             "5x (1800p)", "6x (4K)"});
@@ -555,17 +686,6 @@ void App::add_game_rows(Settings &t, bool per_game)
            {"10%", "20%", "30%", "40%", "50%", "60%", "70%", "80%", "90%", "100%"});
     choice("bloom", "Extra Bloom", "A soft glow around the brightest parts of the picture, on top of the game's own.",
            &t.bloom, 0, {"Off", "Low", "Medium", "High"});
-    {
-        SettingRow r;
-        r.section = section;
-        r.key = "enh_advanced";
-        r.label = tr("Advanced Options");
-        r.help = tr("Shows every enhancement: color, texture filtering, resampling, lighting, fog, texture packs "
-                    "and the game's own graphics mods.");
-        r.bool_value = &settings_->enh_advanced;
-        r.values = {tr("Off"), tr("On")};
-        rows_.push_back(r);
-    }
     if (advanced)
     {
         static const std::vector<std::string> kAdjust = {"-5", "-4", "-3", "-2", "-1", "0",
@@ -621,8 +741,6 @@ void App::add_game_rows(Settings &t, bool per_game)
 #endif
     choice("texture_cache", "Texture Cache Accuracy", "Safe fixes some games' text and effects; Fast is quickest.",
            &t.texture_cache, 0, {"Fast", "Middle", "Safe"});
-    toggle("crop_overscan", "Crop Overscan", "Hides the black borders some games draw at the edges.",
-           &t.crop_overscan);
     toggle("skip_dupes", "Skip Duplicate Frames", "Saves work when a game shows the same frame twice.",
            &t.skip_dupes);
 
@@ -699,8 +817,68 @@ void App::add_game_rows(Settings &t, bool per_game)
            "Wii Speak.",
            &t.microphone);
 
-    header("Controls");
+    if (!per_game)
     {
+        /* The controllers and what each is doing now (ui_app_controllers.cpp):
+         * the rows' values follow the devices while the section is open. */
+        header("Controllers & Accessories");
+        {
+            SettingRow r;
+            r.section = section;
+            r.label = tr("Controller Test & Diagnostics");
+            r.help = tr("Every controller and accessory, what it's doing now, a live test of its buttons, sticks, "
+                        "motion and IR pointer, and what to do when something doesn't work. No game needed.");
+            r.values = {tr("Open\xE2\x80\xA6")};
+            r.action = kRowControllers;
+            r.folder = 1;
+            rows_.push_back(r);
+        }
+        static const char *const kDevices[8] = {"DualSense",    "Mayflash DolphinBar W010", "Wii Remote 1",
+                                                "Wii Remote 2", "Wii Remote 3",             "Wii Remote 4",
+                                                "Switch 2 GameCube Controller", "USB Bluetooth Adapter"};
+        const std::string present = controllers_present();
+        ctl_rows_present_ = present;
+        for (int i = 0; i < 8; ++i)
+        {
+            /* the DolphinBar and its Remotes, the GameCube controller, a Bluetooth adapter: only while
+             * plugged in */
+            const int item = i >= 6 ? i + 1 : i;
+            if (present.find(char('a' + item)) == std::string::npos)
+                continue;
+            SettingRow r;
+            r.section = section;
+            r.label = tr(kDevices[i]);
+            r.help = i == 0   ? tr("The DualSense controllers on the console. Cross opens their live test.")
+                     : i == 1 ? tr("The Mayflash DolphinBar (USB 057E:0306, mode 4). Cross opens its details and "
+                                   "the diagnosis.")
+                     : i == 6 ? tr("Nintendo's GameCube controller for the Switch 2, by USB cable: player 1's "
+                                   "GameCube controller in games, beside the DualSense. Cross opens its live test.")
+                     : i == 7 ? tr("A USB Bluetooth adapter for the Switch 2's GameCube controller without its "
+                                   "cable: press the SYNC button on top of the controller. Cross opens its details.")
+                              : tr("A Wii Remote through the DolphinBar, with its attachment (Nunchuk, Classic "
+                                   "Controller, MotionPlus). Cross opens its live test.");
+            r.live = i;
+            r.values = {controller_row_value(i, nullptr)};
+            r.action = kRowControllers;
+            r.folder = item; /* the test screen's list: the GameCube controller and the adapter after the speaker */
+            rows_.push_back(r);
+        }
+        /* with a DolphinBar plugged in (or real Remotes chosen, so it can be undone) */
+        if (present.find('b') != std::string::npos || t.wii_source)
+        choice("wii_source", "Wii Remotes",
+               "DualSense: your controller plays the Wii Remote. Real Wii Remotes: original Wii Remotes and Wii Remote "
+               "Plus through a Mayflash DolphinBar (mode 4) in a USB port, up to four, with their own Nunchuk, Classic "
+               "Controller, MotionPlus, pointer and motion; the DualSense still opens Porpoise's menu. A Remote is "
+               "found when it's connected to the DolphinBar. Applies when the game starts or this changes.",
+               &t.wii_source, 0, {"DualSense", "Real Wii Remotes (DolphinBar)"});
+        if (present.find('b') != std::string::npos)
+        toggle("real_wiimote_speaker", "Real Wii Remote Speakers",
+               "The speakers of real Wii Remotes (DolphinBar), in games and the speaker test. Off: no sound data is "
+               "sent to them at all. The TV's sound and the DualSense's speaker stay as they are.",
+               &t.real_wiimote_speaker);
+    }
+
+    header("Controls");    {
         std::vector<std::string> layouts = {"GameCube", "PlayStation"};
         for (int i = 1; i <= Settings::kPresets; ++i)
             layouts.push_back(trf("My Layout {n}", {{"n", std::to_string(i)}}));
@@ -729,6 +907,25 @@ void App::add_game_rows(Settings &t, bool per_game)
         choice("stick_deadzone", "Stick Dead Zone",
                "How far the control stick moves before the game sees it: for a stick that drifts on its own.",
                &t.stick_deadzone, 0, {"Off", "Small", "Medium", "Large"});
+    }
+
+    header("GameCube Ports");
+    {
+        /* Dolphin's own Controllers setting (the core's dolphin_si_device_port1..4, gba-link.patch). */
+        static const char *const kPortKeys[] = {"gc_port1_device", "gc_port2_device", "gc_port3_device",
+                                                "gc_port4_device"};
+        static const char *const kPortLabels[] = {"Port 1 (beta)", "Port 2 (beta)", "Port 3 (beta)",
+                                                  "Port 4 (beta)"};
+        int *const ports[] = {&t.gc_port1_device, &t.gc_port2_device, &t.gc_port3_device, &t.gc_port4_device};
+        for (int i = 0; i < 4; ++i)
+            choice(kPortKeys[i], kPortLabels[i],
+                   "What this GameCube controller port holds. GBA (Integrated) is a Game Boy Advance on the link "
+                   "cable, for Wind Waker's Tingle Tuner and Four Swords Adventures: open http://<your PS5's "
+                   "address>:6771 in a browser on the same network for its screen and buttons. It needs the GBA "
+                   "BIOS as /data/porpoise/saves/User/GBA/gba_bios.bin. Best set for one game (its own "
+                   "settings). GameCube games only.",
+                   ports[i], 0, {"Controller", "GBA (Integrated)", "None"});
+
     }
     {
         SettingRow r;
@@ -773,14 +970,186 @@ void App::add_game_rows(Settings &t, bool per_game)
         rows_.push_back(r);
     }
 
+    {
+        header("GBA");
+        {
+            SettingRow r; /* first: the buttons, then who plays which GBA and the rest */
+            r.section = section;
+            r.label = tr("Customize GBA Buttons");
+            r.help = tr("The GBA's buttons on the controller (with the GBA button held): Porpoise's set and two of your "
+                        "own, the GBA button, the left stick, Show, Move and Opacity, and Reset GBA.");
+            r.values = {tr("Edit\xE2\x80\xA6")};
+            r.action = kRowMappingGba;
+            rows_.push_back(r);
+        }
+        /* The GBA on a GameCube port (GameCube Ports above). */
+        {
+            /* Who plays each port's GBA (one set to GBA (Integrated) under GameCube Ports). */
+            static const char *const kKeys[] = {"gba_port1_control", "gba_port2_control", "gba_port3_control",
+                                                "gba_port4_control"};
+            static const char *const kLabels[] = {"GBA on Port 1 (beta)", "GBA on Port 2 (beta)",
+                                                  "GBA on Port 3 (beta)", "GBA on Port 4 (beta)"};
+            int *const controls[] = {&t.gba_port1_control, &t.gba_port2_control, &t.gba_port3_control,
+                                     &t.gba_port4_control};
+            for (int i = 0; i < 4; ++i)
+            {
+                if (!t.port_has_gba(i))
+                    continue;
+                /* Its game, put in as the game starts (before the GBA's BIOS): the files in its folder. */
+                static const char *const kRomKeys[] = {"gba_rom1", "gba_rom2", "gba_rom3", "gba_rom4"};
+                static const char *const kRomLabels[] = {"GBA on Port 1: Game (beta)", "GBA on Port 2: Game (beta)",
+                                                         "GBA on Port 3: Game (beta)", "GBA on Port 4: Game (beta)"};
+                static const char *const kBesideLabels[] = {
+                    "GBA on Port 1: Save Beside the Game (beta)", "GBA on Port 2: Save Beside the Game (beta)",
+                    "GBA on Port 3: Save Beside the Game (beta)", "GBA on Port 4: Save Beside the Game (beta)"};
+                const std::string dir = data_dir_ + "/games/gba/port" + std::to_string(i + 1);
+                SettingRow r;
+                r.section = section;
+                r.key = kRomKeys[i];
+                r.label = beta_label(kRomLabels[i], r.beta, &r.alpha);
+                r.help = tr("The game in this GBA as the game starts, so it boots straight into it: a file you put in "
+                            "the folder below. None: the GBA's BIOS alone. In a game: the menu's GBA Game.") +
+                         "\n" + dir;
+                r.values.push_back(tr("None (BIOS)"));
+                r.text_choices.push_back("");
+                gba_rom_choice_[i] = 0;
+                if (DIR *d = opendir(dir.c_str()))
+                {
+                    std::vector<std::string> names;
+                    while (const dirent *e = readdir(d))
+                    {
+                        std::string n = e->d_name, low = n;
+                        for (char &c : low)
+                            c = char(std::tolower(static_cast<unsigned char>(c)));
+                        for (const char *end : {".gba", ".agb", ".bin"})
+                            if (low.size() > 4 && low.compare(low.size() - 4, 4, end) == 0)
+                                names.push_back(n);
+                    }
+                    closedir(d);
+                    std::sort(names.begin(), names.end());
+                    for (const std::string &n : names)
+                    {
+                        if (n == t.gba_rom[i])
+                            gba_rom_choice_[i] = int(r.values.size());
+                        r.values.push_back(n);
+                        r.text_choices.push_back(n);
+                    }
+                }
+                if (!t.gba_rom[i].empty() && gba_rom_choice_[i] == 0)
+                {
+                    /* Kept, but not in the folder now. */
+                    gba_rom_choice_[i] = int(r.values.size());
+                    r.values.push_back(t.gba_rom[i] + " (" + tr("missing") + ")");
+                    r.text_choices.push_back(t.gba_rom[i]);
+                }
+                r.int_value = &gba_rom_choice_[i];
+                r.text_value = &t.gba_rom[i];
+                rows_.push_back(r);
+                toggle(kRomKeys[i], kBesideLabels[i],
+                       "This GBA's save kept beside its game in its folder (Dolphin's Save in the Same Directory), "
+                       "instead of with Porpoise's saves.",
+                       &t.gba_rom_beside[i]);
+                    choice(kKeys[i], kLabels[i],
+                           "Who plays this GBA. A player plays it while holding their GBA button (each player has "
+                           "their own GBA buttons: Customize GBA Buttons), its sound on their controller and its "
+                           "screen theirs to show. Its Own Controller: the controller in this port is the GBA, no "
+                           "button held (Four Swords Adventures). Nobody: only the page in a browser.",
+                           controls[i], 0,
+                           {"Player 1", "Player 2", "Player 3", "Player 4", "Its Own Controller", "Nobody"});
+            }
+        }
+        toggle("gba_web", "GBA Web Page (beta)",
+               "The GBA's screen and buttons as a page in a browser on the same network: http://<your PS5's "
+               "address>:6771. Off, the GBA plays only on the TV and the controller.",
+               &t.gba_web);
+        toggle("gba_buttons_on", "GBA Buttons on the Controller (beta)",
+               "With a GBA on a port, hold the GBA button (L3 unless you change it) and player 1's controller "
+               "plays the GBA; let go and it's the GameCube's again. Nothing reaches the GameCube game while "
+               "it's held. Set the buttons in Controls > Customize Buttons, on the GBA tab (L1 / R1).",
+               &t.gba_buttons_on);
+        choice("gba_show_mode", "Show GBA Screen (beta)",
+               "The GBA's screen on the TV, over the game: while Show GBA Screen is held (with the GBA button), "
+               "on and off with each press, or always on.",
+               &t.gba_show_mode, 0, {"While Held", "Toggle", "On"});
+        {
+            /* Each GBA's own screen size and opacity (and sound, below), saved as gba_windowN. */
+            static const char *const kKeys[] = {"gba_window1", "gba_window2", "gba_window3", "gba_window4"};
+            for (int i = 0; i < 4; ++i)
+            {
+                if (!t.port_has_gba(i))
+                    continue;
+                static const char *const kSize[] = {"GBA 1 Screen Size (beta)", "GBA 2 Screen Size (beta)",
+                                                    "GBA 3 Screen Size (beta)", "GBA 4 Screen Size (beta)"};
+                static const char *const kOpacity[] = {"GBA 1 Opacity (beta)", "GBA 2 Opacity (beta)",
+                                                       "GBA 3 Opacity (beta)", "GBA 4 Opacity (beta)"};
+                choice(kKeys[i], kSize[i], "How big this GBA's screen is on the TV: one to four times its own 240 x 160.",
+                       &t.gba_window_size[i], 0, {"1x", "2x", "3x", "4x"});
+                choice(kKeys[i], kOpacity[i],
+                       "How much of the game shows through this GBA's screen on the TV. In a game, its player holds "
+                       "the GBA button and Adjust GBA Opacity (L2 unless changed) and pushes the left stick up or "
+                       "down; Move GBA Screen (Circle) and the left stick moves it.",
+                       &t.gba_window_opacity[i], 0, {"40%", "50%", "60%", "70%", "80%", "90%", "100%"});
+                static const char *const kFilter[] = {"GBA 1 Screen Filter (beta)", "GBA 2 Screen Filter (beta)",
+                                                      "GBA 3 Screen Filter (beta)", "GBA 4 Screen Filter (beta)"};
+                static const char *const kBlend[] = {"GBA 1 Interframe Blending (beta)", "GBA 2 Interframe Blending (beta)",
+                                                     "GBA 3 Interframe Blending (beta)", "GBA 4 Interframe Blending (beta)"};
+                choice(kKeys[i], kFilter[i],
+                       "How this GBA's screen on the TV is drawn: its pixels sharp, or softened. The page in a browser "
+                       "has its own (its settings).",
+                       &t.gba_window_filter[i], 0, {"Off", "Soft Pixels"});
+                toggle(kKeys[i], kBlend[i],
+                       "Each of this GBA's pictures shown half over the one before, as on the GBA's own screen: for "
+                       "games that flicker sprites to make them see-through. The TV's only.",
+                       &t.gba_window_blend[i]);
+            }
+        }
+        {
+            static const char *const kKeys[] = {"gba_window1", "gba_window2", "gba_window3", "gba_window4"};
+            static const char *const kVolume[] = {"GBA 1 Volume (beta)", "GBA 2 Volume (beta)", "GBA 3 Volume (beta)",
+                                                  "GBA 4 Volume (beta)"};
+            static const char *const kMute[] = {"Mute GBA 1 (beta)", "Mute GBA 2 (beta)", "Mute GBA 3 (beta)",
+                                                "Mute GBA 4 (beta)"};
+            for (int i = 0; i < 4; ++i)
+            {
+                if (!t.port_has_gba(i))
+                    continue;
+                choice(kKeys[i], kVolume[i],
+                       "This GBA's sound, on the TV or its player's controller. In a game, its player holds the GBA "
+                       "button and GBA Volume (R2 unless changed) and pushes the left stick up or down; Mute GBA (a "
+                       "button of their choosing) turns it off and on.",
+                       &t.gba_window_volume[i], 0, {"0%", "10%", "20%", "30%", "40%", "50%", "60%", "70%", "80%", "90%", "100%"});
+                toggle(kKeys[i], kMute[i], "This GBA's sound off.", &t.gba_window_muted[i]);
+                static const char *const kSpeaker[] = {"GBA 1 Sound on the Controller (beta)", "GBA 2 Sound on the Controller (beta)",
+                                                       "GBA 3 Sound on the Controller (beta)", "GBA 4 Sound on the Controller (beta)"};
+                static const char *const kSmooth[] = {"GBA 1 Speaker Resampling (beta)", "GBA 2 Speaker Resampling (beta)",
+                                                      "GBA 3 Speaker Resampling (beta)", "GBA 4 Speaker Resampling (beta)"};
+                toggle(kKeys[i], kSpeaker[i],
+                       "This GBA's sound from its player's controller speaker instead of the TV, as Dolphin can do "
+                       "for the Wii Remote's speaker. The speakers open as the game starts.",
+                       &t.gba_window_speaker[i]);
+                choice(kKeys[i], kSmooth[i],
+                       "How this GBA's sound is made the controller speaker's rate: Simple (the nearest sample) or "
+                       "Smooth (between two samples, a little softer).",
+                       &t.gba_window_smooth[i], 0, {"Simple", "Smooth"});
+            }
+        }
+    }
     header("Wii Remote");
+    if (per_game) /* everywhere else it's in Controllers & Accessories */
+    choice("wii_source", "Wii Remotes",
+           "DualSense: your controller plays the Wii Remote. Real Wii Remotes: original Wii Remotes and Wii Remote "
+           "Plus through a Mayflash DolphinBar (mode 4) in a USB port, up to four, with their own Nunchuk, Classic "
+           "Controller, MotionPlus, pointer and motion; the DualSense still opens Porpoise's menu. A Remote is "
+           "found when it's connected to the DolphinBar. Applies when the game starts or this changes.",
+           &t.wii_source, 0, {"DualSense", "Real Wii Remotes (DolphinBar)"});
     {
         SettingRow r;
         r.section = section;
-        r.label = tr("Wii Remote Setup");
-        r.help = tr("Beta. Pick the Wii controller, then point at the middle and two corners of your screen: the "
-                    "pointer then matches your screen and how far you sit from it.");
-        r.values = {t.wii_screen_x > 0 ? tr("Measured") : tr("Start\xE2\x80\xA6")};
+        r.label = tr("Controller Hub");
+        r.help = tr("Pick your main controller (the Wii Remote) and a second one (the Nunchuk), then calibrate the "
+                    "pointer with five points, try it in Test & Tune, and keep it all as a template.");
+        r.values = {t.wii_move ? tr("PlayStation Move")
+                               : t.wii_screen_x > 0 ? tr("Calibrated") : tr("Start\xE2\x80\xA6")};
         r.action = kRowWiiSetup;
         rows_.push_back(r);
     }
@@ -793,25 +1162,25 @@ void App::add_game_rows(Settings &t, bool per_game)
             const Settings::WiiPreset &w = t.wii_presets[i];
             presets.push_back(std::to_string(i + 1) + ": " + (w.used ? tr(names[std::size_t(w.name)]) : tr("empty")));
         }
-        choice("wii_preset", "Wii Preset",
-               "A whole Wii Remote set-up kept under a name: made in the setup's Fine-tune page (Advanced).",
+        choice("wii_preset", "Wii Template",
+               "A whole Wii controller setup kept under a name: saved from Wii Controllers (Save as template).",
                &t.wii_preset, 0, presets);
     }
     if (per_game)
         toggle("wii_setup_ask", "Setup Before This Game",
-               "Shows the Wii Remote Setup when this game starts; Triangle there plays straight away.",
+               "Shows the Controller Hub when this game starts; Triangle there plays straight away.",
                &t.wii_setup_ask, "Don't Show", "Show");
     else
         toggle("wii_setup_ask", "Setup Before Each Wii Game",
-               "Shows the Wii Remote Setup when a Wii game starts; Triangle there plays straight away. A game "
+               "Shows the Controller Hub when a Wii game starts; Triangle there plays straight away. A game "
                "can have its own choice in its settings.",
                &t.wii_setup_ask, "Don't Show", "Show");
     {
         SettingRow r;
         r.section = section;
         r.label = tr("How to Hold It");
-        r.help = tr("Beta: a picture of the DualSense as each Wii controller, how to hold it and what every button "
-                    "does. Wii motion controls are still being tuned.");
+        r.help = tr("A picture of the DualSense as each Wii controller, how to hold it and what every button "
+                    "does.");
         r.values = {tr("Show\xE2\x80\xA6")};
         r.action = kRowWiiGuide;
         rows_.push_back(r);
@@ -819,11 +1188,30 @@ void App::add_game_rows(Settings &t, bool per_game)
     choice("wii_controller", "Wii Controller",
            "How a Wii game sees your DualSense. Remote + Nunchuk: the Nunchuk on the left stick and L1 / L2. Remote: "
            "held pointing at the TV, with its motion. Sideways: held like an NES pad, tilt to steer. Two "
-           "controllers (beta): the second DualSense is the Nunchuk. Otherwise every other controller is another "
+           "controllers: the second DualSense is the Nunchuk. Otherwise every other controller is another "
            "player's own Wii Remote, with its own pointer and motion.",
            &t.wii_controller, 0, {"Remote + Nunchuk", "Remote", "Remote Sideways", "Classic Controller",
-                                  "Two Controllers (Alpha)", "GameCube Controller"});
+                                  "Two Controllers", "GameCube Controller"});
     rows_.back().help += " " + tr(kGameCubeOnWiiHelp);
+    toggle("wii_move", "PlayStation Move",
+           "Your PlayStation Move is player 1's Wii Remote: point with it, Move is A, T is B, Cross 1, Circle 2, "
+           "Start +, Select -, PS Home. Hold Square a moment, still, to center the pointer (it also clears the "
+           "gyroscope's drift). Calibrate once in the Controller Hub so the pointer fits your screen. The DualSense "
+           "is the Nunchuk.",
+           &t.wii_move);
+    {
+        std::vector<std::string> colors;
+        for (int i = 0; i < porpoise::move::kBallColors; ++i)
+            colors.push_back(porpoise::move::ball_name(i));
+        choice("move_color", "Move Ball Color",
+               "The color the Move's ball lights up in. The PS3 Eye looks for that color only, so pick one your room "
+               "doesn't have.",
+               &t.move_color, 0, colors);
+    }
+    toggle("ps3_eye", "PS3 Eye Camera",
+           "Looks for a PS3 Eye on the PS5's own USB ports, every few seconds, so you can plug it in or out at any "
+           "time; the island and the menu say what it sees. It needs your jailbreak's ELF loader.",
+           &t.ps3_eye);
     choice("wii_buttons_use", "Wii Buttons",
            "Which buttons the Wii controllers use: Porpoise's, or one of your own two sets, made in Controls > "
            "Customize Buttons (L1 / R1 to each Wii controller). A game can have its own.",
@@ -1040,6 +1428,14 @@ void App::build_settings()
            &draft_.auto_search);
     rows_.back().rescan = true;
 #endif
+    toggle("auto_picks", "Porpoise's Picks",
+           "A game with settings tested on PS5 gets them the first time you play it (and when they're updated), "
+           "unless you've changed its settings yourself. Riptide Boost is never turned on by this.",
+           &draft_.auto_picks);
+    toggle("hide_duplicates", "Hide Duplicate Games",
+           "A game you keep in two files (an ISO and an RVZ of it, say) shows once: the one you played last. A "
+           "game on two discs still shows both.",
+           &draft_.hide_duplicates);
     for (std::size_t i = 0; i < draft_.folders.size(); ++i)
     {
         SettingRow r;
@@ -1124,6 +1520,10 @@ void App::build_settings()
         toggle("download_info", "Download Game Info",
                "Descriptions, developers, release dates and disc art from GameTDB.com, for Details.",
                &draft_.download_info);
+        action("Get Covers and Info Now",
+               "Looks on GameTDB.com now for the covers and game info Porpoise doesn't have yet, whatever the two "
+               "settings above say. Needs the console online.",
+               "Get Now", kRowCoversNow);
         action("Download Covers Again",
                "Gets every game's cover, box and disc art from GameTDB.com again, in place of what Porpoise has (your "
                "own art too). For art that downloaded wrong or cut short. Needs the console online.",
@@ -1226,9 +1626,23 @@ void App::build_settings()
         r.label = tr("Theme");
         r.help = tr(th().about);
         r.int_value = &draft_.ui_theme;
-        for (int i = 0; i < kThemes; ++i)
+        for (int i : kOfferedThemes)
+        {
+            r.order.push_back(i);
             r.values.push_back(tr(theme(i).name));
+        }
         rows_.push_back(r);
+    }
+    if (draft_.ui_theme == int(ThemeId::Glass))
+    {
+        choice("ui_mode", "Mode",
+               "Dark: the room lit by your game's colors. OLED Black: true black around the glow, for OLED TVs. "
+               "Light: frosted white glass for a bright room.",
+               &draft_.ui_mode, {"Dark", "OLED Black", "Light"});
+        choice("glass_layout", "Library",
+               "Cover Flow: your games as cases in a row, the chosen one in front. Rows: a grid of cases, the "
+               "chosen one's details beside them.",
+               &draft_.glass_layout, {"Cover Flow", "Rows"});
     }
     if (th().palettes)
     {
@@ -1272,7 +1686,7 @@ void App::build_settings()
     if (draft_.ui_theme == int(ThemeId::StarCube))
         choice("sc_games", "Games Page", "Star Cube's Games Page: your games as spinning discs, or as covers.",
                &draft_.sc_games, {"Discs", "Covers"});
-    else
+    else if (draft_.ui_theme == int(ThemeId::Revolution))
     {
         static const char *const kHelp[10] = {
             "Cover Flow: the boxes in a row, the chosen one in front.",
@@ -1287,11 +1701,6 @@ void App::build_settings()
             "Spotlight: one game at a time over its own art, with what's known about it; the rest in a strip below."};
         choice("lib_view", "Library View", kHelp[std::clamp(draft_.lib_view, 0, 9)], &draft_.lib_view,
                {"Cover Flow", "Wheel", "Disc Flow", "Shelf", "Box", "List", "Stack", "Helix", "Spines", "Spotlight"});
-        choice("recent_style", "Recently Played",
-               "The games you played last, along the bottom of the library; Down goes to them. Dock: a glass bar "
-               "with the game's name. Floating: the boxes on their own, the chosen one growing like a dock's "
-               "icons. Discs: their discs, the chosen one spinning.",
-               &draft_.recent_style, {"Off", "Dock", "Floating", "Discs"});
     }
     if (draft_.ui_theme != int(ThemeId::StarCube))
     {
@@ -1318,13 +1727,9 @@ void App::build_settings()
         choice("sound_set", "Sound Set", "How the menus sound: Crisp, Soft or Porpoise's original sounds.",
                &draft_.sound_set, {"Crisp", "Soft", "Porpoise"});
     }
-    action("Reset All Settings", "Every setting back to how Porpoise ships. Games, folders and saves stay.",
-           "Reset\xE2\x80\xA6", kRowResetAll);
-    action("Reinitialize Porpoise",
-           "A fresh start: Porpoise opens as it did the first time and you choose a theme again. Games, folders, "
-           "memory cards, saves and save states stay.",
-           "Reinitialize\xE2\x80\xA6", kRowReinitialize);
-
+    toggle("menu_haptics", "Controller Ticks",
+           "A light tick on the DualSense as a menu follows your finger on the touch pad.",
+           &draft_.menu_haptics);
     header("Screenshots");
     {
         if (shots_total_ < 0)
@@ -1369,7 +1774,25 @@ void App::build_settings()
            &draft_.big_prompts);
 
     header("About");
-    info("Porpoise (DolphinPS5)", build_label(), "A GameCube and Wii emulator for PS5, powered by Dolphin.");
+    info("Porpoise", build_label(), "A GameCube and Wii emulator for PS5, powered by Dolphin.");
+    toggle("debug_log_folder", "Debug Logs",
+           "Keeps logs in /data/porpoise/debug, nothing sent anywhere: Porpoise's own, crashes, the Controller Hub's "
+           "motion, and each game you play in a folder of its own. Save a Report gathers the newest.",
+           &draft_.debug_logs);
+    toggle("perf_profile", "Performance Profiler",
+           "For a report on a slow game: notes where the PS5's CPU spends its time while you play, in the debug "
+           "logs. It costs a little speed. Takes effect when Porpoise starts again; turn it off after.",
+           &draft_.perf_profile);
+    {
+        SettingRow r;
+        r.section = section;
+        r.label = tr("Report a Bug");
+        r.help = tr("Cross gathers Porpoise's logs into /data/porpoise/reports (and onto a USB drive, when one is "
+                    "in). Share them in the Discord's bug reports with the game and what happened.");
+        r.values = {tr("Save a Report\xE2\x80\xA6")};
+        r.action = kRowSendReport;
+        rows_.push_back(r);
+    }
     if (!ecam_) /* PS5-ECAM updates the Porpoise it carries with everything else */
     {
         SettingRow r;
@@ -1416,11 +1839,15 @@ void App::build_settings()
                 if (bios_found_.find(one) == std::string::npos)
                     bios_found_ += (bios_found_.empty() ? "" : ", ") + one;
             }
+            segaboot_found_ = !porpoise::bios::find_segaboot(data_dir_ + "/bios").empty();
         }
         info("GameCube BIOS", bios_found_.empty() ? tr("None") : bios_found_,
              "Your console's own BIOS (IPL.bin), for the boot animation: put it in "
              "/data/porpoise/bios, under any name. NTSC plays US and Japanese games, PAL European ones. Porpoise "
              "includes none.");
+        info("Triforce SegaBoot", segaboot_found_ ? tr("Found") : tr("None"),
+             "The arcade board's own firmware (segaboot.gcm), for the arcade games' test menu: put your own in "
+             "/data/porpoise/bios. The games play without it. Porpoise includes none.");
     }
     /* Help and the community: the RIPALDA Discord (bug reports go there now),
      * with a code to scan beside it. */
@@ -1431,21 +1858,29 @@ void App::build_settings()
            "Cross checks what Porpoise can see and do on this console - the jailbreak, its folder, drives, games, "
            "the last game's speed - and saves the results with the logs, to share on the Discord.",
            "Run\xE2\x80\xA6", kRowDiagnostic);
+
+    /* Credits: one row that opens them; Ruben first, his mark beside his name. */
     {
         SettingRow r;
         r.section = section;
-        r.label = tr("Report a Bug");
-        r.help = tr("Cross gathers Porpoise's logs into /data/porpoise/reports (and onto a USB drive, when one is "
-                    "in). Share them in the Discord's bug reports with the game and what happened.");
-        r.values = {tr("Save a Report\xE2\x80\xA6")};
-        r.action = kRowSendReport;
+        r.label = tr("Credits");
+        r.help = credits_open_ ? tr("Everyone who made Porpoise possible. Cross folds them away again.")
+                               : tr("Everyone who made Porpoise possible: Cross shows them.");
+        r.values = {credits_open_ ? tr("Hide") : tr("Show")};
+        r.action = kRowCredits;
         rows_.push_back(r);
     }
-
-    /* Credits: Ruben first, his mark beside his name. */
+    const std::size_t credits_at = rows_.size();
     info("Created By", "Ruben (@elripalda)", "Porpoise, its menus, music and sounds: Ruben. @elripalda - ripalda.dev");
     info("Website", "ripalda.dev", "Ruben's projects, news and downloads, with links to the Discord and more.");
-    info("Music and Sounds", "@elripalda", "The menu music and sound effects, made for Porpoise by Ruben.");
+    info("Music and Sounds", "@elripalda", "The legacy looks' menu music and the sound effects, made for Porpoise by Ruben.");
+    info("Menu Music", "LOiME", "\"Soundscape\", the new look's menu music.");
+    info("PlayStation Move", "REXCRAFT88",
+         "His Move Studio work shaped Porpoise's Move calibration: centering held still clears the gyroscope's "
+         "drift, the Move starts fresh when it reconnects, the pointer snaps to the middle, the setup's center "
+         "carries into the game, and the PS3 Eye looks for the ball's own color and leaves out the room's other "
+         "lights. Players 2 to 4's Moves and every Navigation controller connect through his Move Management, "
+         "read with his input client. github.com/REXCRAFT88");
     info("Dolphin on PS5", "Mihawk (mihawk-99)",
          "Mihawk (mihawk-99) brought the Dolphin core to the PS5. Porpoise is built on his port of Dolphin and "
          "RetroArch.");
@@ -1474,10 +1909,20 @@ void App::build_settings()
     info("Trademarks", "Sony",
          "PlayStation, PS5 and DualSense are trademarks of Sony Interactive Entertainment. Porpoise is not affiliated "
          "with Sony.");
+    if (!credits_open_)
+        rows_.resize(credits_at);
+    else
+        for (std::size_t i = credits_at; i < rows_.size(); ++i)
+            rows_[i].indent = true;
+    action("Reset All Settings", "Every setting back to how Porpoise ships. Games, folders and saves stay.",
+           "Reset\xE2\x80\xA6", kRowResetAll);
+    action("Reinitialize Porpoise",
+           "A fresh start: Porpoise opens as it did the first time and you choose a theme again. Games, folders, "
+           "memory cards, saves and save states stay.",
+           "Reinitialize\xE2\x80\xA6", kRowReinitialize);
 
-    simplify_rows(false);
-    if (settings_row_ < 0 || settings_row_ >= int(rows_.size()) || rows_[std::size_t(settings_row_)].header)
-        settings_row_ = 1;
+    consolidate_rows(false);
+    settle_settings_row();
     rail_ = std::clamp(rail_, 0, std::max(0, section_count() - 1));
 }
 
@@ -1556,9 +2001,8 @@ void App::build_game_settings()
     add_game_rows(game_, true);
     add_recommended_rows();
     add_cheat_rows();
-    simplify_rows(true);
-    if (settings_row_ < 0 || settings_row_ >= int(rows_.size()) || rows_[std::size_t(settings_row_)].header)
-        settings_row_ = 1;
+    consolidate_rows(true);
+    settle_settings_row();
     rail_ = std::clamp(rail_, 0, std::max(0, section_count() - 1));
 }
 
@@ -1787,8 +2231,19 @@ void App::add_recommended_rows()
         /* Dual core turned back off by the player's own choice, not forced on. */
         if (fix.key == "CPUThread")
             rec.off_value = game_.dual_core ? "True" : "False";
-        add(label, why + tr("Dolphin's own fix for this game, on by itself. Turning it off may help speed but can bring "
-                            "back the problem it fixes."),
+        add(label,
+            why + (fix.key == "SafeTextureCacheColorSamples"
+                       ? tr("Dolphin's own fix for this game: a slower, more careful texture cache. Turning it off uses "
+                            "the fast one: often much faster on PS5, though some textures may show wrong.")
+                   : fix.key == "PageTableFastmem"
+                       ? tr("This game runs its own virtual memory. Dolphin maps it for speed, but on the PS5 few of "
+                            "its pages can be, and each change costs time. Turning this off may run the game faster "
+                            "and smooth out hitches when it loads new things. Nothing else changes.")
+                   : fix.key == "CPUThread"
+                       ? tr("Dolphin keeps this game on one core. Turning this off runs it on two, kept in step (Sync "
+                            "GPU): often faster on PS5. If the game hangs or glitches, turn it back on.")
+                       : tr("Dolphin's own fix for this game, on by itself. Turning it off may help speed but can "
+                            "bring back the problem it fixes.")),
             rec);
     }
     if (out.size() == 1)
@@ -1820,85 +2275,140 @@ void App::set_own_count()
             r.values = {plural(change_count(), "1 change", "{n} changes")};
 }
 
-void App::simplify_rows(bool per_game)
+void App::consolidate_rows(bool per_game)
 {
+    /* 4.5: fewer tabs, each with its parts under small headings (what were
+     * sections of their own), and every setting shown: no Show All Settings. */
+    struct TabParts
+    {
+        const char *tab;
+        std::vector<const char *> parts;
+    };
+    static const std::vector<TabParts> kMain = {
+        {"Games", {"Games", "Downloads", "Storage"}},
+        {"Video and Audio", {"Video", "Enhancements", "Emulation", "Audio"}},
+        {"Graphics", {"Graphics", "Textures"}},
+        {"Controls", {"Controls", "Wii Remote"}},
+        {"Saves and Screenshots", {"Save States", "Screenshots"}},
+        {"Console and Online", {"Console", "Online"}},
+        {"Interface", {"Interface"}},
+        {"Accessibility", {"Accessibility"}},
+        {"About", {"About"}},
+    };
+    static const std::vector<TabParts> kGame = {
+        {"This Game", {"This Game"}},
+        {"Auto Boost", {"Auto Boost"}},
+        {"Home Screen", {"Home Screen"}},
+        {"Cheats and Patches", {"Cheats and Patches"}},
+        {"Video and Graphics", {"Video", "Enhancements", "Graphics", "Textures", "Emulation"}},
+        {"Audio", {"Audio"}},
+        {"Controls", {"Controls", "Wii Remote"}},
+        {"Save States", {"Save States"}},
+        {"Console and Online", {"Console", "Online"}},
+    };
+    const std::vector<TabParts> &tabs = per_game ? kGame : kMain;
+
+    /* The rows of each section as it was built, in order. */
+    std::vector<std::string> order;
+    std::vector<std::vector<SettingRow>> parts;
+    for (const SettingRow &r : rows_)
+    {
+        const auto it = std::find(order.begin(), order.end(), r.section);
+        std::size_t at = std::size_t(it - order.begin());
+        if (it == order.end())
+        {
+            order.push_back(r.section);
+            parts.emplace_back();
+        }
+        if (!r.header)
+            parts[at].push_back(r);
+    }
+    auto part_rows = [&](const std::string &name) -> std::vector<SettingRow> * {
+        const auto it = std::find(order.begin(), order.end(), name);
+        return it == order.end() ? nullptr : &parts[std::size_t(it - order.begin())];
+    };
+    /* A part's heading: its old name, but the Games tab's own part says what it is. */
+    auto part_title = [](const std::string &part) { return part == "Games" ? std::string("Your Games") : part; };
+
+    std::vector<SettingRow> out;
+    out.reserve(rows_.size() + 24);
+    std::vector<std::string> used;
+    auto add_tab = [&](const std::string &tab, const std::vector<std::string> &names) {
+        int filled = 0;
+        for (const std::string &n : names)
+        {
+            const std::vector<SettingRow> *rows = part_rows(n);
+            filled += rows && !rows->empty() ? 1 : 0;
+        }
+        if (!filled)
+            return;
+        SettingRow h;
+        h.section = tab;
+        h.header = true;
+        out.push_back(h);
+        for (const std::string &n : names)
+        {
+            used.push_back(n);
+            std::vector<SettingRow> *rows = part_rows(n);
+            if (!rows || rows->empty())
+                continue;
+            if (filled > 1)
+            {
+                SettingRow sh;
+                sh.section = tab;
+                sh.group = n;
+                sh.subhead = true;
+                sh.label = tr(part_title(n));
+                out.push_back(sh);
+            }
+            for (SettingRow &r : *rows)
+            {
+                r.group = n;
+                r.section = tab;
+                out.push_back(r);
+            }
+        }
+    };
+    for (const TabParts &t : tabs)
+    {
+        std::vector<std::string> names;
+        for (const char *p : t.parts)
+            names.push_back(p);
+        add_tab(t.tab, names);
+    }
+    /* Anything else (Developer) keeps a tab of its own, after. */
+    for (const std::string &n : order)
+        if (std::find(used.begin(), used.end(), n) == used.end())
+            add_tab(n, {n});
+    rows_.swap(out);
+}
+
+bool App::row_stop(int i) const
+{
+    return i >= 0 && i < int(rows_.size()) && !rows_[std::size_t(i)].header && !rows_[std::size_t(i)].subhead;
+}
+
+void App::settle_settings_row()
+{
+    /* The chosen row is always one you can stop on (after a rebuild). */
     if (rows_.empty())
         return;
-    {
-        SettingRow sw;
-        sw.section = rows_.front().section;
-        sw.label = tr("Show All Settings");
-        sw.help = tr("Off: just the settings most players need. On: every setting Porpoise has, for fine-tuning. "
-                     "Hidden settings keep their values either way.");
-        sw.values = {""};
-        sw.action = kRowAllSettings;
-        sw.toggle = settings_->all_settings ? 1 : 0;
-        rows_.insert(rows_.begin() + 1, sw);
-    }
-    if (settings_->all_settings || settings_->developer)
+    settings_row_ = std::clamp(settings_row_, 0, int(rows_.size()) - 1);
+    if (row_stop(settings_row_))
         return;
-    struct Keep
-    {
-        const char *section;
-        bool all;                 /* the whole section */
-        bool actions;             /* its rows without a setting (buttons, lists) */
-        std::vector<const char *> keys;
-    };
-    static const Keep kKeep[] = {
-        {"This Game", true, true, {}},
-        {"Auto Boost", true, true, {}},
-        {"Home Screen", true, true, {}},
-        {"Cheats and Patches", true, true, {}},
-        {"Games", true, true, {}},
-        {"Video", false, false, {"output_res", "frame_gen", "fg_steady30", "wide", "fps_overlay"}},
-        {"Enhancements", false, false, {"resolution", "antialiasing", "screen_filter", "filter_strength"}},
-        {"Save States", false, false, {"quick_resume"}},
-        {"Audio", false, false, {"volume", "audio_preset"}},
-        {"Controls", false, true, {"button_layout", "rumble"}},
-        {"Wii Remote", false, true, {"wii_preset", "wii_controller", "wii_pointer"}},
-        {"Console", false, true, {"language"}},
-        {"Interface", false, false, {"ui_language", "ui_theme", "ui_palette", "menu_music_level", "menu_sounds_level"}},
-        {"Screenshots", true, true, {}},
-        {"Accessibility", true, true, {}},
-        {"About", true, true, {}},
-    };
-    auto kept = [&](const SettingRow &r) {
-        if (r.action == kRowAllSettings)
-            return true;
-        for (const Keep &k : kKeep)
+    const std::string section = rows_[std::size_t(settings_row_)].section;
+    for (int i = settings_row_; i < int(rows_.size()) && rows_[std::size_t(i)].section == section; ++i)
+        if (row_stop(i))
         {
-            if (r.section != k.section)
-                continue;
-            if (k.all)
-                return true;
-            if (r.key.empty())
-                return k.actions;
-            for (const char *key : k.keys)
-                if (r.key == key)
-                    return true;
-            return false;
+            settings_row_ = i;
+            return;
         }
-        return false;
-    };
-    (void)per_game;
-    std::vector<SettingRow> out;
-    out.reserve(rows_.size());
-    for (std::size_t i = 0; i < rows_.size(); ++i)
-    {
-        const SettingRow &r = rows_[i];
-        if (r.header)
+    for (int i = settings_row_; i >= 0; --i)
+        if (row_stop(i))
         {
-            /* A section stays when something in it does. */
-            bool any = false;
-            for (std::size_t j = i + 1; j < rows_.size() && !rows_[j].header; ++j)
-                any = any || kept(rows_[j]);
-            if (any)
-                out.push_back(r);
+            settings_row_ = i;
+            return;
         }
-        else if (kept(r))
-            out.push_back(r);
-    }
-    rows_.swap(out);
 }
 
 bool App::rec_on(const RecRow &rec) const
@@ -1963,6 +2473,13 @@ void App::toggle_recommended(int index)
             set_game_key(rec.key, &rec.off_value);
         else
             set_game_key(rec.key, nullptr);
+        if (rec.key == "dolphin.Core.CPUThread")
+        {
+            /* 4.6: two cores for a game Dolphin keeps on one, kept in step
+             * (Sync GPU): most of the speed, little of the risk. */
+            static const std::string kOn = "True";
+            set_game_key("dolphin.Core.SyncGPU", on && rec.off_value == "True" ? &kOn : nullptr);
+        }
         break;
     case RecRow::Pick:
         set_game_key(rec.key, on ? nullptr : &rec.value);
@@ -2002,7 +2519,7 @@ std::string App::section_name(int index) const
 int App::first_row_of(const std::string &section) const
 {
     for (int i = 0; i < int(rows_.size()); ++i)
-        if (!rows_[std::size_t(i)].header && rows_[std::size_t(i)].section == section)
+        if (row_stop(i) && rows_[std::size_t(i)].section == section)
             return i;
     return -1;
 }
@@ -2053,7 +2570,9 @@ void App::change_setting(int dir)
         }
         else
             *r.int_value = std::clamp(*r.int_value + dir, r.min, r.min + n - 1);
-        if (r.text_value && r.int_value == &border_choice_)
+        if (r.text_value && !r.text_choices.empty())
+            *r.text_value = r.text_choices[std::size_t(std::clamp(*r.int_value, 0, int(r.text_choices.size()) - 1))];
+        else if (r.text_value && r.int_value == &border_choice_)
             *r.text_value = border_names_[std::size_t(std::clamp(border_choice_, 0, int(border_names_.size()) - 1))];
     }
     if (r.key == "enh_advanced")
@@ -2185,6 +2704,7 @@ void App::change_setting(int dir)
         apply_at_once(key == "ui_theme" ? std::vector<std::string>{"ui_theme", "ui_palette", "ui_font"}
                                         : std::vector<std::string>{key});
     if (key == "ui_theme" || key == "ui_layout" || key == "lib_view" || key == "mc_view" || key == "sc_games" ||
+        key == "ui_mode" || key == "glass_layout" ||
         key == "ui_palette" || key == "ui_font" || key == "wii_preset" || key == "text_size")
     {
         const int row = settings_row_;
@@ -2197,10 +2717,12 @@ bool App::applies_at_once(const std::string &key)
 {
     static const char *const kKeys[] = {
         "ui_theme",      "ui_palette",   "ui_font",         "ui_layout",      "lib_view",     "mc_view",  "recent_dock", "recent_style",
+        "ui_mode",       "glass_layout",
         "sc_games",      "ui_pointer",   "text_size",       "high_contrast",  "bold_focus",  "reduced_motion", "still_background",
         "big_prompts",   "colour_filter", "colour_filter_games", "border",    "screen_filter", "filter_strength",
         "menu_music",    "menu_sounds",  "music_volume",    "sounds_volume", "sound_set",
-        "bloom",         "color_saturation", "color_contrast", "color_warmth"};
+        "bloom",         "color_saturation", "color_contrast", "color_warmth",
+        "crop_left",     "crop_right",   "crop_top",        "crop_bottom", "menu_haptics", "hide_duplicates"};
     for (const char *k : kKeys)
         if (key == k)
             return true;
@@ -2428,6 +2950,16 @@ App::Action App::activate_row(const SettingRow &row)
         return Action::None;
     case kRowRescan:
         return Action::Rescan;
+    case kRowCredits:
+    {
+        credits_open_ = !credits_open_;
+        const int row = settings_row_;
+        build_settings();
+        settings_row_ = std::clamp(row, 0, int(rows_.size()) - 1);
+        settle_settings_row();
+        sfx(Sound::MenuScroll);
+        return Action::None;
+    }
     case kRowResetAll:
         open_dialog(DialogKind::ResetAll, tr("Reset all settings?"),
                     tr("Every setting goes back to how Porpoise ships. Your games, folders, covers and saves stay."),
@@ -2442,11 +2974,19 @@ App::Action App::activate_row(const SettingRow &row)
     case kRowMapping:
         open_mapping();
         return Action::None;
+    case kRowMappingGba:
+        open_mapping();
+        map_kind_ = 5; /* the GBA's tab */
+        map_row_ = 0;
+        return Action::None;
     case kRowShots:
         open_shots("", Screen::Main);
         return Action::None;
     case kRowWiiGuide:
         open_wii_guide();
+        return Action::None;
+    case kRowControllers:
+        open_controllers(row.folder < 0 ? 1 : row.folder);
         return Action::None;
     case kRowWiiSetup:
         open_wii_setup(screen_ == Screen::GameSettings ? game_for_ : nullptr, false, "");
@@ -2541,6 +3081,11 @@ App::Action App::activate_row(const SettingRow &row)
                         {{"file", nand_bin_}}),
                     tr("Import"));
         return Action::None;
+    case kRowCoversNow:
+        applied_note_ = tr("Getting covers and game info\xE2\x80\xA6");
+        applied_note_time_ = time_;
+        sfx(Sound::LaunchGame);
+        return Action::FetchCovers;
     case kRowCoversAgain:
         if (screen_ == Screen::GameSettings && game_for_)
         {
@@ -2566,6 +3111,7 @@ App::Action App::activate_row(const SettingRow &row)
 
 App::Action App::update_settings(bool up, bool down, bool left, bool right)
 {
+    settle_settings_row();
     const bool game = screen_ == Screen::GameSettings;
     const int sections = section_count();
     if (on_rail_)
@@ -2613,7 +3159,10 @@ App::Action App::update_settings(bool up, bool down, bool left, bool right)
     const std::string section = rows_[std::size_t(settings_row_)].section;
     auto step = [&](int dir) {
         int r = settings_row_ + dir;
-        if (r >= 0 && r < int(rows_.size()) && !rows_[std::size_t(r)].header && rows_[std::size_t(r)].section == section)
+        while (r >= 0 && r < int(rows_.size()) && rows_[std::size_t(r)].subhead &&
+               rows_[std::size_t(r)].section == section)
+            r += dir; /* (over a part's heading) */
+        if (row_stop(r) && rows_[std::size_t(r)].section == section)
         {
             settings_row_ = r;
             sfx(Sound::MenuScroll);
@@ -2856,6 +3405,7 @@ void App::draw_settings()
 {
     Gfx &g = *g_;
     const bool game = screen_ == Screen::GameSettings;
+    settle_settings_row();
     const std::string current = on_rail_ ? section_name(rail_) : rows_[std::size_t(settings_row_)].section;
 
     /* Section rail. */
@@ -2970,23 +3520,19 @@ void App::draw_settings()
     if (current == "About")
         subtitle = tr("Porpoise for PS5") + " \xE2\x80\xA2 " + tr("created by @elripalda") + " \xE2\x80\xA2 ripalda.dev";
     else if (current == "Games")
-        subtitle = tr("Where Porpoise looks for your games");
-    else if (current == "Downloads")
-        subtitle = tr("Covers and game info from GameTDB.com");
-    else if (current == "Storage")
-        subtitle = tr("Where Porpoise keeps its things, and the app sandbox");
-    else if (current == "Textures" && !game)
-        subtitle = tr("HD texture packs, and the games they're for");
-    else if (current == "Online" && !game)
-        subtitle = tr("Wii games online \xE2\x80\xA2 the Online Hub has everything");
+        subtitle = tr("Your games, their covers, and where Porpoise keeps things");
+    else if (current == "Graphics" && !game)
+        subtitle = tr("How games are drawn, and HD texture packs");
+    else if (current == "Console and Online" && !game)
+        subtitle = tr("The consoles' own settings, and Wii games online");
     else if (current == "This Game")
         subtitle = tr("Values in blue are this game's own");
     else if (current == "Interface")
         subtitle = tr("How Porpoise looks and reads");
     else if (current == "Accessibility")
         subtitle = tr("Easier to see, read and follow");
-    else if (current == "Screenshots")
-        subtitle = tr("Pictures of your games, taken while you play");
+    else if (current == "Saves and Screenshots")
+        subtitle = tr("Save states, and pictures of your games");
     else if (current == "Developer")
         subtitle = tr("For tuning the Wii Remote; nothing here is needed to play");
     else if (current == "Home Screen")
@@ -3054,6 +3600,16 @@ void App::draw_settings()
                              std::find(game_keys_.begin(), game_keys_.end(), r.key) != game_keys_.end();
             const bool waiting = row_pending(r, pending);
             const float cy = y + row_h * 0.5f;
+            if (r.subhead)
+            {
+                /* A part of the tab: its name, small, over its rows. */
+                std::string head = r.label;
+                for (char &c : head)
+                    c = char(std::toupper((unsigned char)c));
+                g.text_mid(Font::Bold, ts(22), row_x + 28, cy + 14, kLavender, Align::Left, head, 2.0f);
+                y += row_h;
+                continue;
+            }
             if (waiting)
                 g.panel(row_x + 8, cy - 7, 14, 14, kPending, 1, 7); /* changed, not applied yet */
             if (on)
@@ -3269,14 +3825,16 @@ void App::draw_settings()
         draw_prompts({{Glyph::Cross, "Change"}, {Glyph::Circle, "Sections"}}, {}, "");
     else if (focus.action == kRowRescan)
         draw_prompts({{Glyph::Cross, "Search"}, {Glyph::Circle, "Sections"}}, {}, "");
-    else if (focus.action == kRowMapping)
+    else if (focus.action == kRowMapping || focus.action == kRowMappingGba)
         draw_prompts({{Glyph::Cross, "Customize"}, {Glyph::Circle, "Sections"}}, {}, "");
     else if (focus.action == kRowShots)
+        draw_prompts({{Glyph::Cross, "Open"}, {Glyph::Circle, "Sections"}}, {}, "");
+    else if (focus.action == kRowControllers)
         draw_prompts({{Glyph::Cross, "Open"}, {Glyph::Circle, "Sections"}}, {}, "");
     else if (focus.action == kRowWiiGuide)
         draw_prompts({{Glyph::Cross, "Show"}, {Glyph::Circle, "Sections"}}, {}, "");
     else if (focus.action == kRowWiiSetup)
-        draw_prompts({{Glyph::Cross, "Start"}, {Glyph::Circle, "Sections"}}, {}, "");
+        draw_prompts({{Glyph::Cross, "Open"}, {Glyph::Circle, "Sections"}}, {}, "");
     else if (focus.action == kRowOnlineDns)
         draw_prompts({{Glyph::Cross, "Change"}, {Glyph::Circle, "Sections"}}, {}, "");
     else if (focus.action == kRowMoveData)
